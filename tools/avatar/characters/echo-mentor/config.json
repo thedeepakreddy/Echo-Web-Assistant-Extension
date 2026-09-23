@@ -1,0 +1,130 @@
+{
+  "name": "Echo",
+  "note": "Crop and neck drafted from Vision landmarks; eyes, irises and lip line traced by hand.",
+  "scale": 0.438,
+  "crop": [
+    111,
+    23,
+    954,
+    1076
+  ],
+  "eyes": {
+    "left": {
+      "corners": [
+        [
+          415,
+          420
+        ],
+        [
+          489,
+          437
+        ]
+      ],
+      "top": [
+        450,
+        399
+      ],
+      "bottom": [
+        455,
+        437
+      ]
+    },
+    "right": {
+      "corners": [
+        [
+          578,
+          436
+        ],
+        [
+          656,
+          421
+        ]
+      ],
+      "top": [
+        622,
+        399
+      ],
+      "bottom": [
+        610,
+        437
+      ]
+    },
+    "irises": [
+      [
+        455,
+        418,
+        21
+      ],
+      [
+        615,
+        419,
+        21
+      ]
+    ],
+    "iris_travel": [
+      7,
+      2
+    ]
+  },
+  "mouth": {
+    "corners": [
+      450,
+      610
+    ],
+    "line": [
+      [
+        450,
+        551
+      ],
+      [
+        465,
+        560
+      ],
+      [
+        502,
+        575
+      ],
+      [
+        540,
+        578
+      ],
+      [
+        570,
+        574
+      ],
+      [
+        595,
+        564
+      ],
+      [
+        610,
+        554
+      ]
+    ],
+    "lip_search": [
+      543,
+      586
+    ],
+    "grin": true,
+    "rounding": 0.5
+  },
+  "neck": {
+    "pivot": [
+      533,
+      720
+    ],
+    "body_from": [
+      658,
+      683
+    ],
+    "head_to": [
+      705,
+      739
+    ]
+  },
+  "body_fade": [
+    897,
+    1024
+  ],
+  "side_fade": 0.07
+}

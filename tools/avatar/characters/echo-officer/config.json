@@ -1,0 +1,107 @@
+{
+  "name": "Echo",
+  "note": "Picture padded 90 rows on top by restore_cap.py (crown rebuilt); eyes, irises and lip line traced by hand.",
+  "scale": 0.426,
+  "crop": [
+    592,
+    8,
+    1484,
+    1124
+  ],
+  "eyes": {
+    "left": {
+      "ellipse": [
+        956,
+        428,
+        44,
+        37
+      ]
+    },
+    "right": {
+      "ellipse": [
+        1114,
+        441,
+        43,
+        39
+      ]
+    },
+    "irises": [
+      [
+        958,
+        432,
+        23
+      ],
+      [
+        1108,
+        443,
+        23
+      ]
+    ],
+    "iris_travel": [
+      7,
+      2
+    ]
+  },
+  "mouth": {
+    "corners": [
+      926,
+      1138
+    ],
+    "line": [
+      [
+        926,
+        569
+      ],
+      [
+        938,
+        586
+      ],
+      [
+        976,
+        616
+      ],
+      [
+        1026,
+        629
+      ],
+      [
+        1076,
+        624
+      ],
+      [
+        1113,
+        604
+      ],
+      [
+        1138,
+        571
+      ]
+    ],
+    "lip_search": [
+      561,
+      637
+    ],
+    "grin": true,
+    "rounding": 0.3
+  },
+  "neck": {
+    "pivot": [
+      1031,
+      797
+    ],
+    "body_from": [
+      741,
+      763
+    ],
+    "head_to": [
+      784,
+      814
+    ]
+  },
+  "body_fade": [
+    996,
+    1124
+  ],
+  "side_fade": 0.07,
+  "padded_top": 90
+}
