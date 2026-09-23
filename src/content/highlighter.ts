@@ -20,20 +20,32 @@ function showChip(x: number, y: number, text: string) {
   removeChip();
   chip = document.createElement('div');
   chip.className = 'echo-hl-chip';
-  chip.textContent = '🖍 Save to ECHO';
+  // ECHO's glass look, inline because the chip lives outside ECHO's own root.
+  const mark = document.createElement('span');
+  Object.assign(mark.style, {
+    width: '8px', height: '8px', borderRadius: '50%', flex: 'none',
+    background: 'linear-gradient(135deg, #b8a1ff, #ff9fd0)',
+    boxShadow: '0 0 8px rgba(184,161,255,0.8)',
+  } as CSSStyleDeclaration);
+  chip.append(mark, document.createTextNode('Save to ECHO'));
   Object.assign(chip.style, {
     position: 'absolute',
     left: `${Math.max(8, x - 60)}px`,
-    top: `${Math.max(8, y - 42)}px`,
-    background: '#1e2230',
-    color: '#e8eaed',
-    border: '1px solid #4a90e2',
-    borderRadius: '8px',
-    padding: '6px 11px',
-    font: '600 12px -apple-system,BlinkMacSystemFont,sans-serif',
+    top: `${Math.max(8, y - 44)}px`,
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    background: 'linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.03)), rgba(20,22,32,0.78)',
+    backdropFilter: 'blur(24px) saturate(180%)',
+    color: 'rgba(255,255,255,0.95)',
+    border: '1px solid rgba(255,255,255,0.16)',
+    borderRadius: '999px',
+    padding: '7px 14px 7px 11px',
+    font: '600 12px/1.2 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif',
+    letterSpacing: '-0.006em',
     cursor: 'pointer',
     zIndex: '2147483646',
-    boxShadow: '0 6px 20px rgba(0,0,0,0.45)',
+    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.26), 0 10px 28px rgba(0,0,0,0.35)',
     userSelect: 'none',
     whiteSpace: 'nowrap',
   } as CSSStyleDeclaration);
