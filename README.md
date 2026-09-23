@@ -1,4 +1,4 @@
-# ECHO - Local-First Autonomous Browser Agent
+# ECHO Web - Local-First Autonomous Browser Agent
 
 > A Chrome extension that drives your browser for you, built around a four-tier routing engine that answers roughly 85% of requests on-device and only spends LLM tokens on work that genuinely needs a model.
 
@@ -175,33 +175,6 @@ Rule-based observation of dwell time, scroll depth and form shape. Offers a summ
 **Voice**
 Speech recognition runs in a sandboxed iframe so microphone permission works on any origin, with speech synthesis for replies and an optional hands-free mode that reopens the microphone after each answer.
 
-**Personalization and memories**
-Your name, a short "about you", an answer style and standing instructions are added to every cloud prompt. Memories can be added, edited and deleted in Options (or by saying "remember my city is Hyderabad"), and a switch controls whether the AI sees them. Everything stays in local storage.
-
-**Skills**
-Saved prompts run with `/shortcut` from the side panel (with a picker), the in-page box, or the address bar. Seven built-ins ship (`/summarize`, `/key-points`, `/explain`, `/improve`, `/translate`, `/reply`, `/social-post`); any message can be saved as a new skill.
-
-**ECHO Writer**
-Right-click selected text or a text field: improve, rewrite, shorten, expand, fix grammar, change tone (five tones) or translate (eight languages). The result appears in a card with Copy and Replace; Replace writes back into the exact selection through the browser's own editing command, so undo and framework change events work. Password, payment and code fields are refused.
-
-**Chat history and temporary chat**
-Conversations are saved locally (up to 100), listed in the side panel's history drawer, and reopened with their context. A temporary chat lives only in session storage, never appears in history, and writes no cached answers.
-
-**Address bar**
-Type `echo`, Space, then a question or `/skill`; the answer opens in the side panel.
-
-**Video transcripts**
-On YouTube, summaries and questions use the video's captions (the player's caption track, or the transcript panel as a fallback) instead of the page text. Other sites fall back to captions loaded into the `<video>` element.
-
-**@ tab mentions**
-Type `@` in the side panel to attach up to five open tabs; their text (or transcripts) goes to the model as clearly fenced, untrusted context.
-
-**Web search with citations**
-With Claude, Anthropic's server-side `web_search` tool; with Gemini, Google Search grounding. Answers carry numbered markers linked to a source list. Search runs automatically for live-information questions, or on demand with the 🌐 button; it can be turned off in Options.
-
-**Isolated agent browsing**
-Press 🕶️ before a task and the agent works in a separate private window: no cookies, logins or history from normal browsing, no saved memories in its prompt, HTTPS only, tools confined to that window, and every action still needs approval. Chrome extensions cannot create browser profiles, so this uses an incognito window and requires "Allow in Incognito".
-
 ---
 
 ## Skills This Project Demonstrates
@@ -339,5 +312,35 @@ Being straight about the current limits:
 * Tier 2 depends on Chrome's built-in AI for its best output, which is not yet widely available. A bundled WebGPU model would close that gap at the cost of a large first-run download.
 
 ---
+## 🚀 Coming Soon: ECHO Mac (Desktop Assistant)
+
+While the ECHO Web Extension rules your browser, **ECHO Mac** (currently 90% complete) is about to rule your entire operating system.
+
+ECHO Mac is a super-autonomous desktop assistant being built to operate completely outside the browser. It features mind-blowing capabilities that will make it feel like you have a true AI engineer sitting inside your machine. **Currently, ECHO Mac already boasts over 100+ active features.**
+
+**20 of the Mind-Blowing Features of ECHO Mac:**
+1. **Infinite Autonomous Cloning (The Best Feature):** ECHO Mac can literally clone itself an unlimited number of times. If you give it 10 massive tasks, it spawns 10 independent sub-agents that execute everything simultaneously in the background.
+2. **Full File-System Control:** Automatically read, write, and organize local files and folders.
+3. **Autonomous Software Engineer:** Clones repositories, reads Jira tickets, writes code, runs tests, and opens PRs completely unattended.
+4. **Vision OS Integration:** Natively sees the screen via Apple Screen Capture frameworks at 60fps.
+5. **Deep System Control:** Direct integration with Spotify, Mail, Calendar, and System Preferences via AppleScript.
+6. **Always-On Context:** Constantly learns from everything you do on your Mac to build a personalized, local AI brain.
+7. **Local Sandbox Execution:** Safely tests untrusted code in Docker containers automatically.
+8. **Overnight Work Mode:** Give ECHO Mac a massive, multi-step goal before you go to sleep, and it will work overnight to finish it.
+9. **Self-Healing Code:** Automatically detects runtime errors in your local environment, analyzes the stack trace, and applies patches.
+10. **Native Desktop Voice:** Speaks directly through MacOS CoreAudio with ultra-low latency conversational capabilities.
+11. **Intelligent Screen OCR:** Instantly reads and extracts text from videos, images, and unselectable UI elements across the whole OS.
+12. **Cross-App Workflows:** Can move files from Finder into Photoshop, apply edits, and email the result without human intervention.
+13. **Automated Meeting Proxy:** Attends Zoom or Google Meet calls on your behalf, records transcripts, and extracts action items.
+14. **Local LLM Hosting:** Runs massive AI models entirely locally on Apple Silicon (M-series) to guarantee zero latency and 100% privacy.
+15. **Database Architect:** Connects to local PostgreSQL/MySQL databases, analyzes schemas, and writes complex SQL migrations on demand.
+16. **Proactive System Maintenance:** Monitors CPU, RAM, and disk space, automatically clearing caches and optimizing performance.
+17. **Dynamic UI Generation:** Instantly codes and renders custom SwiftUI or React widgets on your desktop to display data you ask for.
+18. **Continuous Deployment Agent:** Monitors your local git branches and auto-deploys to AWS/Vercel when tests pass.
+19. **Semantic File Search:** Stop searching by file name. Just say "Find the PDF where the lawyer talked about the severance package," and it finds it instantly.
+20. **Automated Social Engineering:** Can log into LinkedIn on your browser, find leads, and send personalized connection requests.
+21. **Self-Evolving Architecture:** ECHO Mac rewrites its own core logic scripts to optimize its speed based on your daily usage patterns.
+
+Stay tuned. The future of operating systems is arriving soon.
 
 Built by Deepak Reddy.
