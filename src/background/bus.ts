@@ -4,22 +4,18 @@
 // local-brain, watchers…) talk to the user through here, so the orb, the side
 // panel and the persistent transcript can never drift out of sync.
 
-export interface TranscriptEntry {
-  role: 'user' | 'echo';
-  text: string;
-  ts?: number;
-  tier?: number;
+import { appendEntry, newChat, isTemporaryChat, ChatEntry, Source } from './chats';
+
+export type TranscriptEntry = ChatEntry;
+
+/** Append to the active chat (saved history, or the temporary chat). */
+export function pushTranscript(entry: TranscriptEntry) {
+  appendEntry(entry);
 }
 
-const TRANSCRIPT_CAP = 200;
-
-/** Append to the persistent transcript the side panel reads on open. */
-export function pushTranscript(entry: TranscriptEntry) {
-  chrome.storage.local.get(['echo_transcript'], (r) => {
-    const t = (r.echo_transcript || []) as TranscriptEntry[];
-    t.push({ ...entry, ts: Date.now() });
-    chrome.storage.local.set({ echo_transcript: t.slice(-TRANSCRIPT_CAP) });
-  });
+/** Start a fresh chat, keeping the current temporary/saved mode. */
+export async function clearTranscript(): Promise<void> {
+  await newChat(await isTemporaryChat());
 }
 
 /**
@@ -36,13 +32,18 @@ export function safeSendMessage(tabId: number | undefined | null, msg: any) {
     try { chrome.runtime.sendMessage(msg).catch(() => {}); } catch { /* no page open */ }
   }
   if (msg.type === 'ECHO_SAY' && typeof msg.text === 'string') {
-    pushTranscript({ role: 'echo', text: msg.text, tier: msg.tier });
+    pushTranscript({ role: 'echo', text: msg.text, tier: msg.tier, sources: msg.sources, searchHtml: msg.searchHtml });
   }
 }
 
-/** Speak/print a reply. `tier` tags which brain answered (0-3) for the UI badge. */
-export function say(tabId: number | undefined, text: string, tier?: number) {
-  safeSendMessage(tabId, { type: 'ECHO_SAY', text, tier });
+/**
+ * Speak/print a reply. `tier` tags which brain answered (0-3) for the UI badge;
+ * `extra` carries web-search citations.
+ */
+export function say(tabId: number | undefined, text: string, tier?: number,
+  extra: { sources?: Source[]; searchHtml?: string } = {}) {
+  const sources = extra.sources?.length ? extra.sources : undefined;
+  safeSendMessage(tabId, { type: 'ECHO_SAY', text, tier, sources, searchHtml: extra.searchHtml });
 }
 
 /** Update the orb / panel status line. */

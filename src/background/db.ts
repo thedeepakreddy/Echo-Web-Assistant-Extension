@@ -82,14 +82,12 @@ export async function idbGet<T = any>(store: string, key: IDBValidKey): Promise<
 }
 
 export async function idbDelete(store: string, key: IDBValidKey): Promise<void> {
-  try {
-    const db = await getDB();
-    await new Promise<void>((resolve, reject) => {
-      const r = tx(db, store, 'readwrite').delete(key);
-      r.onsuccess = () => resolve();
-      r.onerror = () => reject(r.error);
-    });
-  } catch { /* ignore */ }
+  const db = await getDB();
+  await new Promise<void>((resolve, reject) => {
+    const r = tx(db, store, 'readwrite').delete(key);
+    r.onsuccess = () => resolve();
+    r.onerror = () => reject(r.error);
+  });
 }
 
 export async function idbGetAll<T = any>(store: string, limit = 1000): Promise<T[]> {
@@ -119,14 +117,12 @@ export async function idbGetAllByIndex<T = any>(store: string, index: string, ke
 }
 
 export async function idbClear(store: string): Promise<void> {
-  try {
-    const db = await getDB();
-    await new Promise<void>((resolve, reject) => {
-      const r = tx(db, store, 'readwrite').clear();
-      r.onsuccess = () => resolve();
-      r.onerror = () => reject(r.error);
-    });
-  } catch { /* ignore */ }
+  const db = await getDB();
+  await new Promise<void>((resolve, reject) => {
+    const r = tx(db, store, 'readwrite').clear();
+    r.onsuccess = () => resolve();
+    r.onerror = () => reject(r.error);
+  });
 }
 
 export async function idbCount(store: string): Promise<number> {

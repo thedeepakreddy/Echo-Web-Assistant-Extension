@@ -3,6 +3,14 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { getAuthConfig, AuthConfig } from './auth';
 import { executeTool } from './tools';
 import { say as busSay, safeSendMessage as busSend, echoUser } from './bus';
+import { personalContext } from './personalization';
+import {
+  webSearchMode, looksLikeSearch, claudeSearchToolType, formatClaudeCitations,
+  formatGeminiGrounding, stripClaudeSearchBlocks,
+} from './web-search';
+import { ISOLATED_PROMPT } from './isolation';
+import { isVideoUrl } from './video';
+import type { Source } from './chats';
 
 // System prompt giving ECHO its identity and instructions.
 // Kept deliberately compact — it is re-sent on every step of the agent loop,
@@ -22,7 +30,9 @@ RULE 4 — BE TOKEN-EFFICIENT (CRITICAL — the user has limited API quota):
 - Never call both get_page_text and read_screen for the same need.
 - Finish in the fewest steps that get the job done.
 
-RULE 5 — SPEAK NATURALLY: Short, natural replies. Never read out raw HTML or code. When done, briefly say what you did.`;
+RULE 5 — SPEAK NATURALLY: Short, natural replies. Never read out raw HTML or code. When done, briefly say what you did.
+
+RULE 6 — VIDEOS: On a video page, call get_video_transcript to learn what is said; the page text does not contain it.`;
 
 interface EchoTool {
   name: string;
@@ -36,8 +46,8 @@ interface EchoTool {
 // ~8,750 tokens of pure schema overhead per task, burning free-tier quota in
 // 1-2 tasks. Keeping the always-sent set to 10 slim tools cuts that to ~800.
 const CORE_TOOLS: EchoTool[] = [
-  { name: "read_screen",    description: "Get page URL, title, numbered interactive elements, visible text.", schema: { type: "object", properties: {} } },
-  { name: "get_page_text", description: "Get full readable page text (use to summarize or answer about content).", schema: { type: "object", properties: {} } },
+  { name: "read_screen",    description: "Get page URL, title, up to 25 numbered interactive elements and visible text. Use offset to page through more controls.", schema: { type: "object", properties: { offset: { type: "number" } } } },
+  { name: "get_page_text", description: "Get readable page text in 4000-character chunks. Follow NEXT_OFFSET to read more.", schema: { type: "object", properties: { offset: { type: "number" } } } },
   { name: "click_element", description: "Click element by number from read_screen.", schema: { type: "object", properties: { index: { type: "number" } }, required: ["index"] } },
   { name: "type_text",     description: "Type into input by number. submit=true presses Enter.", schema: { type: "object", properties: { index: { type: "number" }, text: { type: "string" }, submit: { type: "boolean" } }, required: ["index", "text"] } },
   { name: "press_key",     description: "Press key on focused element: Enter, Escape, Tab, Backspace, ArrowUp/Down/Left/Right.", schema: { type: "object", properties: { key: { type: "string" } }, required: ["key"] } },
@@ -63,23 +73,28 @@ const _T_SAVE_TASK:    EchoTool = { name: "save_task",         description: "Sav
 const _T_RUN_TASK:     EchoTool = { name: "run_task",          description: "Run saved task by name.", schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } };
 const _T_LIST_TASKS:   EchoTool = { name: "list_tasks",        description: "List saved tasks.", schema: { type: "object", properties: {} } };
 const _T_DEL_TASK:     EchoTool = { name: "delete_task",       description: "Delete saved task by name.", schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } };
+const _T_TRANSCRIPT:   EchoTool = { name: "get_video_transcript", description: "Get the current video's transcript in chunks (YouTube or captioned video). Follow NEXT_OFFSET for more.", schema: { type: "object", properties: { offset: { type: "number" } } } };
 const _T_REMINDER:     EchoTool = { name: "schedule_reminder", description: "Schedule reminder notification (message, in_minutes, optional task_name).", schema: { type: "object", properties: { message: { type: "string" }, in_minutes: { type: "number" }, task_name: { type: "string" } }, required: ["message", "in_minutes"] } };
 
 // Select only the tools the current request likely needs.
 // This is the single biggest token-saving mechanism: on a simple "search for X"
 // task we send 10 tools (~800 tokens) instead of 25 tools (~2,500 tokens).
-function selectTools(userInput: string): EchoTool[] {
+interface ToolContext { pageUrl?: string; memory?: boolean; isolated?: boolean }
+
+function selectTools(userInput: string, ctx: ToolContext = {}): EchoTool[] {
   const q = userInput.toLowerCase();
   const tools: EchoTool[] = [...CORE_TOOLS];
+  const memory = ctx.memory !== false && !ctx.isolated;
 
   if (/screenshot|image|color|colour|picture|visual|photo|look like/.test(q)) tools.push(_T_SCREENSHOT);
   if (/find|highlight|locate|where is|search.*page/.test(q))                  tools.push(_T_FIND);
   if (/table|extract|spreadsheet|csv/.test(q))                                 tools.push(_T_TABLE, _T_DOWNLOAD);
   if (/download|export|save.{0,10}(file|data)|write.*file/.test(q))           tools.push(_T_DOWNLOAD);
   if (/tab|window|switch tab|other tab|list tab/.test(q))                      tools.push(_T_LIST_TABS, _T_SWITCH_TAB, _T_CLOSE_TAB);
-  if (/remember|memory|forget|recall|store|you know/.test(q))                 tools.push(_T_SAVE_MEM, _T_LIST_MEM, _T_DEL_MEM);
-  if (/task|macro|save.*task|run.*task|saved task/.test(q))                   tools.push(_T_SAVE_TASK, _T_RUN_TASK, _T_LIST_TASKS, _T_DEL_TASK);
-  if (/remind|reminder|alert|notify|in \d+ min/.test(q))                      tools.push(_T_REMINDER);
+  if (memory && /remember|memory|forget|recall|store|you know/.test(q))      tools.push(_T_SAVE_MEM, _T_LIST_MEM, _T_DEL_MEM);
+  if (!ctx.isolated && /task|macro|save.*task|run.*task|saved task/.test(q))  tools.push(_T_SAVE_TASK, _T_RUN_TASK, _T_LIST_TASKS, _T_DEL_TASK);
+  if (!ctx.isolated && /remind|reminder|alert|notify|in \d+ min/.test(q))     tools.push(_T_REMINDER);
+  if ((ctx.pageUrl && isVideoUrl(ctx.pageUrl)) || /video|youtube|transcript|lecture|podcast|clip/.test(q)) tools.push(_T_TRANSCRIPT);
 
   // Deduplicate (in case a keyword matched multiple groups)
   const seen = new Set<string>();
@@ -88,9 +103,12 @@ function selectTools(userInput: string): EchoTool[] {
 
 // Memory state (cleared per session for simplicity in this demo)
 let anthropicClient: Anthropic | null = null;
+let anthropicClientKey = '';
 let currentConversation: any[] = [];
+let forgetConversationAfterReply = false;
 
 let geminiClient: GoogleGenAI | null = null;
+let geminiClientKey = '';
 let currentGeminiConversation: any[] = [];
 let currentOpenAIConversation: any[] = []; // used by TogetherAI & OpenRouter
 let currentAbortController: AbortController | null = null;
@@ -129,6 +147,15 @@ function pruneClaude(conv: any[]): any[] {
   return s;
 }
 function compressClaude(conv: any[]) {
+  // Old search results are large and never needed again; the latest assistant
+  // turn stays intact in case it is a paused (pause_turn) server-tool turn.
+  let lastAssistant = -1;
+  for (let i = 0; i < conv.length; i++) if (conv[i].role === 'assistant') lastAssistant = i;
+  for (let i = 0; i < conv.length; i++) {
+    if (i !== lastAssistant && conv[i].role === 'assistant' && Array.isArray(conv[i].content)) {
+      conv[i].content = stripClaudeSearchBlocks(conv[i].content);
+    }
+  }
   let last = -1;
   for (let i = 0; i < conv.length; i++) {
     const m = conv[i];
@@ -204,16 +231,54 @@ export function abortCurrentWork() {
   }
 }
 
+export function clearCloudConversation() {
+  abortCurrentWork();
+  forgetConversationAfterReply = false;
+  currentConversation = [];
+  currentGeminiConversation = [];
+  currentOpenAIConversation = [];
+  _lastCloudReply = '';
+  resetTaskUsage();
+}
+
+/**
+ * Reopening a saved chat: give the model that chat's recent turns as plain
+ * text so it can continue the conversation.
+ */
+export function seedCloudConversation(entries: { role: 'user' | 'echo'; text: string }[]) {
+  const turns: { role: 'user' | 'assistant'; text: string }[] = [];
+  for (const e of entries.slice(-KEEP_MESSAGES * 2)) {
+    const text = String(e?.text || '').slice(0, 4000);
+    if (!text) continue;
+    const role = e.role === 'user' ? 'user' : 'assistant';
+    const prev = turns[turns.length - 1];
+    if (prev && prev.role === role) prev.text += `\n\n${text}`;
+    else turns.push({ role, text });
+  }
+  while (turns.length && turns[0].role !== 'user') turns.shift();
+  while (turns.length && turns[turns.length - 1].role !== 'assistant') turns.pop();
+  currentConversation = turns.map(t => ({ role: t.role, content: t.text }));
+  currentGeminiConversation = turns.map(t => ({ role: t.role === 'user' ? 'user' : 'model', parts: [{ text: t.text }] }));
+  currentOpenAIConversation = turns.map(t => ({ role: t.role, content: t.text }));
+}
+
+/** A tool call must finish its tool-result exchange before history is cleared. */
+export function forgetCloudConversationAfterReply() {
+  forgetConversationAfterReply = true;
+}
+
 async function getClients(config: AuthConfig) {
-  if (config.provider === 'claude' && !anthropicClient) {
+  if (config.provider === 'claude' && (!anthropicClient || anthropicClientKey !== config.anthropicApiKey)) {
     anthropicClient = new Anthropic({
       apiKey: config.anthropicApiKey,
       dangerouslyAllowBrowser: true 
     });
-  } else if (config.provider === 'gemini' && !geminiClient) {
+    anthropicClientKey = config.anthropicApiKey || '';
+  } else if (config.provider === 'gemini' && (!geminiClient || geminiClientKey !== config.geminiApiKey)) {
     geminiClient = new GoogleGenAI({ 
       apiKey: config.geminiApiKey,
     });
+    geminiClientKey = config.geminiApiKey || '';
   }
   return { anthropicClient, geminiClient };
 }
@@ -222,15 +287,18 @@ async function getClients(config: AuthConfig) {
 // orb, the side panel and the transcript through exactly the same path.
 // Everything the cloud says is also kept here so the router can cache it.
 let _lastCloudReply = '';
+// Searched answers are time-sensitive and carry citations; never cache them.
+let _lastReplyUncacheable = false;
 
 /** The most recent thing the cloud tier said. Consumed by smart-router. */
-export function lastCloudReply(): string { return _lastCloudReply; }
+export function lastCloudReply(): string { return _lastReplyUncacheable ? '' : _lastCloudReply; }
 
 function safeSendMessage(tabId: number | undefined, msg: any) {
   if (msg.type === 'ECHO_SAY' && typeof msg.text === 'string') {
     // Accumulate multi-block replies so the cached answer is the whole thing.
     _lastCloudReply = _lastCloudReply ? `${_lastCloudReply}\n${msg.text}` : msg.text;
-    busSay(tabId, msg.text, 3);
+    if (msg.sources?.length) _lastReplyUncacheable = true;
+    busSay(tabId, msg.text, 3, { sources: msg.sources, searchHtml: msg.searchHtml });
     return;
   }
   busSend(tabId, msg);
@@ -256,16 +324,17 @@ function accumulateUsage(tabId: number | undefined, input: number, output: numbe
   });
 }
 
-function getEchoMemory(): Promise<any> {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(['echo_memory'], (result) => resolve(result.echo_memory || {}));
-  });
-}
-
 export interface CloudOptions {
   /** Set when the router already echoed the user's message to the transcript. */
   skipEcho?: boolean;
+  /** The user asked for a web search (side panel toggle, or "search the web"). */
+  webSearch?: boolean;
+  /** Run in the private ECHO window: no memory, tools confined to that window. */
+  isolated?: boolean;
 }
+
+/** Per-task facts every provider loop needs. */
+interface TaskContext { search: boolean; forcedSearch: boolean; tools: ToolContext }
 
 export async function processUserInput(userInput: string, tabId?: number, opts: CloudOptions = {}) {
   abortCurrentWork();
@@ -283,49 +352,60 @@ export async function processUserInput(userInput: string, tabId?: number, opts: 
 
   resetTaskUsage();
   _lastCloudReply = '';   // fresh buffer so the router caches only this answer
+  _lastReplyUncacheable = false;
 
   if (!opts.skipEcho) echoUser(userInput);
 
   try {
     const config = await getAuthConfig();
     const { anthropicClient, geminiClient } = await getClients(config);
-    const memory = await getEchoMemory();
-    
-    let dynamicSystemPrompt = SYSTEM_PROMPT;
-    if (Object.keys(memory).length > 0) {
-      dynamicSystemPrompt += `\n\n--- LONG TERM MEMORY ---\nYou have saved the following facts and preferences about the user/environment:\n`;
-      for (const [key, value] of Object.entries(memory)) {
-        dynamicSystemPrompt += `- [${key}]: ${value}\n`;
-      }
-      dynamicSystemPrompt += `Use this information to assist the user proactively.`;
+
+    // Personalization always applies; memories stay out of private-window tasks.
+    let dynamicSystemPrompt = SYSTEM_PROMPT + await personalContext({ includeMemory: !opts.isolated });
+    if (opts.isolated) dynamicSystemPrompt += ISOLATED_PROMPT;
+    const memoryOn = (await chrome.storage.local.get(['echo_memory_enabled'])).echo_memory_enabled !== false;
+
+    let pageUrl = '';
+    try { if (tabId != null) pageUrl = (await chrome.tabs.get(tabId)).url || ''; } catch { /* closed */ }
+
+    const searchCapable = config.provider === 'claude' || config.provider === 'gemini';
+    const mode = await webSearchMode();
+    const task: TaskContext = {
+      forcedSearch: !!opts.webSearch,
+      search: searchCapable && (!!opts.webSearch || (mode === 'auto' && looksLikeSearch(userInput))),
+      tools: { pageUrl, memory: memoryOn, isolated: !!opts.isolated },
+    };
+    if (opts.webSearch && !searchCapable) {
+      safeSendMessage(tabId!, { type: 'ECHO_SAY', text: 'Web search with citations works with Claude or Gemini (set in Options). Answering without it.' });
     }
-    
-    safeSendMessage(tabId!, { type: 'ECHO_STATE', state: 'Thinking...' });
+
+    safeSendMessage(tabId!, { type: 'ECHO_STATE', state: task.search ? 'Searching the web...' : 'Thinking...' });
 
     if (config.provider === 'claude') {
-      await runClaudeLoop(anthropicClient!, userInput, tabId!, signal, dynamicSystemPrompt);
+      await runClaudeLoop(anthropicClient!, userInput, tabId!, signal, dynamicSystemPrompt, config.anthropicModel!, task);
     } else if (config.provider === 'gemini') {
-      await runGeminiLoop(geminiClient!, userInput, tabId!, signal, dynamicSystemPrompt);
+      if (task.search) await runGeminiSearch(geminiClient!, userInput, tabId!, signal, dynamicSystemPrompt, config.geminiModel!);
+      else await runGeminiLoop(geminiClient!, userInput, tabId!, signal, dynamicSystemPrompt, config.geminiModel!, task);
     } else if (config.provider === 'togetherai') {
       await runOpenAICompatibleLoop(
         'https://api.together.xyz/v1/chat/completions',
         config.togetherApiKey!,
         config.togetherModel!,
-        userInput, tabId!, signal, dynamicSystemPrompt
+        userInput, tabId!, signal, dynamicSystemPrompt, task
       );
     } else if (config.provider === 'openrouter') {
       await runOpenAICompatibleLoop(
         'https://openrouter.ai/api/v1/chat/completions',
         config.openrouterApiKey!,
         config.openrouterModel!,
-        userInput, tabId!, signal, dynamicSystemPrompt
+        userInput, tabId!, signal, dynamicSystemPrompt, task
       );
     } else if (config.provider === 'groq') {
       await runOpenAICompatibleLoop(
         'https://api.groq.com/openai/v1/chat/completions',
         config.groqApiKey!,
         config.groqModel!,
-        userInput, tabId!, signal, dynamicSystemPrompt
+        userInput, tabId!, signal, dynamicSystemPrompt, task
       );
     }
   } catch (err: any) {
@@ -343,26 +423,44 @@ export async function processUserInput(userInput: string, tabId?: number, opts: 
         : 'Auth/Init Error: ' + err.message,
     });
     safeSendMessage(tabId!, { type: 'ECHO_STATE', state: 'Error' });
+  } finally {
+    if (forgetConversationAfterReply) {
+      forgetConversationAfterReply = false;
+      currentConversation = [];
+      currentGeminiConversation = [];
+      currentOpenAIConversation = [];
+      _lastCloudReply = '';
+    }
   }
 }
 
-async function runClaudeLoop(client: Anthropic, userInput: string, tabId: number, signal: AbortSignal, systemPrompt: string) {
+async function runClaudeLoop(client: Anthropic, userInput: string, tabId: number, signal: AbortSignal, systemPrompt: string, model: string, task: TaskContext) {
   // Mutable — updated when open_url creates a new tab or switch_tab changes focus.
   let activeTabId = tabId;
   try {
-    currentConversation = pruneClaude(currentConversation);
-    currentConversation.push({ role: 'user', content: userInput });
+    currentConversation = pruneClaude(currentConversation).map(m =>
+      m.role === 'assistant' ? { ...m, content: stripClaudeSearchBlocks(m.content) } : m);
+    currentConversation.push({
+      role: 'user',
+      content: task.forcedSearch ? `${userInput}\n\n(Search the web for this and cite your sources.)` : userInput,
+    });
 
     // Prompt caching: mark the static system prompt + tools block so repeated
     // in-task requests bill them at the reduced cache-read rate on Claude.
     const cachedSystem = [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }] as any;
-    const activeTools = selectTools(userInput);
-    const claudeTools = activeTools.map((t, i) => ({
+    const activeTools = selectTools(userInput, task.tools);
+    const clientTools = activeTools.map((t, i) => ({
       name: t.name,
       description: t.description,
       input_schema: t.schema as any,
       ...(i === activeTools.length - 1 ? { cache_control: { type: 'ephemeral' } } : {})
-    })) as any;
+    })) as any[];
+    // Anthropic's server-side web search runs inside the same request; results
+    // come back as cited text, with no tool_result round-trip from us.
+    let search = task.search;
+    const toolsFor = () => (search
+      ? [{ type: claudeSearchToolType(model), name: 'web_search', max_uses: 3 }, ...clientTools]
+      : clientTools) as any;
 
     let isFinished = false;
     let steps = 0;
@@ -378,62 +476,73 @@ async function runClaudeLoop(client: Anthropic, userInput: string, tabId: number
       // Collapse stale screen/tool data so per-request size stays bounded.
       compressClaude(currentConversation);
 
-      const response = await client.messages.create({
-        model: 'claude-3-5-sonnet-latest',
-        max_tokens: 900,
-        system: cachedSystem,
-        messages: currentConversation,
-        tools: claudeTools
-      }, { signal });
+      let response: Anthropic.Message;
+      try {
+        // Room for adaptive thinking on newer models, which counts toward max_tokens.
+        response = await client.messages.create({
+          model,
+          max_tokens: 4096,
+          system: cachedSystem,
+          messages: currentConversation,
+          tools: toolsFor(),
+        }, { signal });
+      } catch (e: any) {
+        // Web search can be disabled for an organization or unsupported by an
+        // older model. Answer without it rather than failing the request.
+        if (search && e instanceof Anthropic.BadRequestError && /web.?search/i.test(String(e.message))) {
+          search = false;
+          steps--;
+          safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: "Web search isn't available for this Claude key or model, so I'll answer without it. (An organization admin can enable it in the Claude Console.)" });
+          continue;
+        }
+        throw e;
+      }
 
       const cu: any = (response as any).usage || {};
       accumulateUsage(activeTabId, (cu.input_tokens || 0) + (cu.cache_read_input_tokens || 0) + (cu.cache_creation_input_tokens || 0), cu.output_tokens || 0);
 
       currentConversation.push({ role: 'assistant', content: response.content });
-      let toolUsed = false;
 
-      for (const block of response.content) {
-        if (block.type === 'text') {
-          safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: block.text });
-        } else if (block.type === 'tool_use') {
-          toolUsed = true;
-          safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Executing ' + block.name + '...' });
+      // Claude splits a cited answer into many text blocks: say it once, with sources.
+      const { text, sources } = formatClaudeCitations(response.content as any[]);
+      if (text) safeSendMessage(activeTabId, { type: 'ECHO_SAY', text, sources });
 
-          try {
-            const result = await executeTool(block.name, block.input, activeTabId);
-            // Keep activeTabId in sync so subsequent DOM actions hit the right tab.
-            if (block.name === 'open_url' && (result as any)?.newTabId) activeTabId = (result as any).newTabId;
-            if (block.name === 'switch_tab' && (block.input as any)?.tabId) activeTabId = Number((block.input as any).tabId);
-            let toolResultContent: Anthropic.ToolResultBlockParam['content'] = [];
+      if (response.stop_reason === 'refusal') {
+        if (!text) safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: 'Claude declined this request.' });
+        safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
+        break;
+      }
+      // A long server-side search can pause; resending the conversation resumes it.
+      if (response.stop_reason === 'pause_turn') continue;
 
-            if (block.name === 'screenshot' && result.dataUrl) {
-              const base64Data = result.dataUrl.split(',')[1];
-              toolResultContent.push({
-                type: 'image',
-                source: { type: 'base64', media_type: 'image/png', data: base64Data }
-              });
-            } else {
-              toolResultContent.push({ type: 'text', text: JSON.stringify(result) });
-            }
+      const toolUses = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+      if (!toolUses.length) {
+        isFinished = true;
+        if (response.stop_reason === 'max_tokens') {
+          safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: '(My reply hit the length limit. Ask me to continue if you need the rest.)' });
+        }
+        safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
+        break;
+      }
 
-            currentConversation.push({
-              role: 'user',
-              content: [{ type: 'tool_result', tool_use_id: block.id, content: toolResultContent }]
-            });
-
-          } catch (e: any) {
-            currentConversation.push({
-              role: 'user',
-              content: [{ type: 'tool_result', tool_use_id: block.id, content: [{ type: 'text', text: 'Error executing tool: ' + e.message }], is_error: true }]
-            });
-          }
+      const results: Anthropic.ToolResultBlockParam[] = [];
+      for (const block of toolUses) {
+        safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Executing ' + block.name + '...' });
+        try {
+          const result = await executeTool(block.name, block.input, activeTabId);
+          // Keep activeTabId in sync so subsequent DOM actions hit the right tab.
+          if (block.name === 'open_url' && (result as any)?.newTabId) activeTabId = (result as any).newTabId;
+          if (block.name === 'switch_tab' && (block.input as any)?.tabId) activeTabId = Number((block.input as any).tabId);
+          const content: Anthropic.ToolResultBlockParam['content'] = block.name === 'screenshot' && result?.dataUrl
+            ? [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: result.dataUrl.split(',')[1] } }]
+            : [{ type: 'text', text: JSON.stringify(result) }];
+          results.push({ type: 'tool_result', tool_use_id: block.id, content });
+        } catch (e: any) {
+          results.push({ type: 'tool_result', tool_use_id: block.id, content: [{ type: 'text', text: 'Error executing tool: ' + e.message }], is_error: true });
         }
       }
-
-      if (!toolUsed) {
-        isFinished = true;
-        safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
-      }
+      // Every result for one assistant turn goes back in a single user message.
+      currentConversation.push({ role: 'user', content: results });
     }
   } catch (err: any) {
     if (err.message === 'Aborted by user' || err.name === 'AbortError') {
@@ -505,7 +614,66 @@ function friendlyGeminiError(raw: string): string {
   return `Gemini error: ${first}`;
 }
 
-async function runGeminiLoop(client: GoogleGenAI, userInput: string, tabId: number, signal: AbortSignal, systemPrompt: string) {
+const GEMINI_FALLBACKS = ['gemini-3.5-flash-lite', 'gemini-3.5-flash'];
+
+/**
+ * A Gemini answer grounded in Google Search. This is its own request (no page
+ * tools), which works on every Gemini model; the answer carries citations.
+ */
+async function runGeminiSearch(client: GoogleGenAI, userInput: string, tabId: number, signal: AbortSignal, systemPrompt: string, model: string) {
+  let lastQuotaError = '';
+  try {
+    currentGeminiConversation = pruneGemini(currentGeminiConversation);
+    currentGeminiConversation.push({ role: 'user', parts: [{ text: userInput }] });
+
+    let response: any = null;
+    for (const m of [...new Set([model, ...GEMINI_FALLBACKS])]) {
+      if (signal.aborted) throw new Error('Aborted by user');
+      try {
+        response = await client.models.generateContent({
+          model: m,
+          contents: currentGeminiConversation,
+          config: {
+            systemInstruction: `${systemPrompt}\n\nAnswer using Google Search results. Be concise and factual.`,
+            tools: [{ googleSearch: {} }],
+            abortSignal: signal,
+          },
+        });
+        break;
+      } catch (e: any) {
+        const msg = String(e?.message ?? e);
+        if (signal.aborted) throw new Error('Aborted by user');
+        if (/404|NOT_FOUND|no longer available/.test(msg)) continue;
+        if (/429|RESOURCE_EXHAUSTED|quota/i.test(msg)) { lastQuotaError = msg; continue; }
+        throw new Error(friendlyGeminiError(msg));
+      }
+    }
+    if (!response) {
+      throw new Error(lastQuotaError ? friendlyGeminiError(lastQuotaError) : 'None of the Gemini models responded to the search request.');
+    }
+    accumulateUsage(tabId, response.usageMetadata?.promptTokenCount || 0, response.usageMetadata?.candidatesTokenCount || 0);
+
+    const candidate = response.candidates?.[0];
+    const answer = (candidate?.content?.parts || [])
+      .filter((p: any) => typeof p.text === 'string' && !p.thought).map((p: any) => p.text).join('').trim();
+    currentGeminiConversation.push({ role: 'model', parts: [{ text: answer || '(no answer)' }] });
+
+    const { text, sources, searchHtml } = formatGeminiGrounding(answer, candidate?.groundingMetadata);
+    safeSendMessage(tabId, { type: 'ECHO_SAY', text: text || "I couldn't find an answer to that.", sources, searchHtml });
+    safeSendMessage(tabId, { type: 'ECHO_STATE', state: 'Idle' });
+  } catch (err: any) {
+    if (err.message === 'Aborted by user' || err.name === 'AbortError') {
+      safeSendMessage(tabId, { type: 'ECHO_STATE', state: 'Idle' });
+      return;
+    }
+    const msg = String(err.message || err);
+    const alreadyFriendly = /^(Your Gemini key|Gemini's rate limit|That Gemini API key|Gemini error:|None of the Gemini)/.test(msg);
+    safeSendMessage(tabId, { type: 'ECHO_SAY', text: alreadyFriendly ? msg : friendlyGeminiError(msg) });
+    safeSendMessage(tabId, { type: 'ECHO_STATE', state: 'Error' });
+  }
+}
+
+async function runGeminiLoop(client: GoogleGenAI, userInput: string, tabId: number, signal: AbortSignal, systemPrompt: string, model: string, task: TaskContext) {
   let activeTabId = tabId;
   // Remembered so that if every model is quota-blocked we can explain why.
   let lastQuotaError = '';
@@ -518,15 +686,11 @@ async function runGeminiLoop(client: GoogleGenAI, userInput: string, tabId: numb
 
     // Real, currently-available models only, cheapest/fastest first. (The old
     // list started with non-existent models that 404'd, wasting a request each.)
-    const GEMINI_MODELS = [
-      'gemini-2.0-flash',
-      'gemini-2.5-flash',
-      'gemini-1.5-flash',
-      'gemini-1.5-pro'
-    ];
+    // Fallbacks are current stable models (2.x is closed to new projects).
+    const GEMINI_MODELS = [...new Set([model, ...GEMINI_FALLBACKS])];
     let modelIndex = 0;
 
-    const activeTools = selectTools(userInput);
+    const activeTools = selectTools(userInput, task.tools);
     while (!isFinished) {
       if (steps++ >= MAX_STEPS) {
         safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: "That took more steps than expected, so I've stopped. Want me to keep going?" });
@@ -697,13 +861,14 @@ async function runOpenAICompatibleLoop(
   userInput: string,
   tabId: number,
   signal: AbortSignal,
-  systemPrompt: string
+  systemPrompt: string,
+  task: TaskContext
 ) {
   let activeTabId = tabId;
   try {
     // Build tools in OpenAI function-calling format — only the tools this
     // request needs (dynamic selection cuts schema tokens by ~60–70 %).
-    const openaiTools = selectTools(userInput).map(t => ({
+    const openaiTools = selectTools(userInput, task.tools).map(t => ({
       type: 'function',
       function: { name: t.name, description: t.description, parameters: t.schema }
     }));
@@ -737,7 +902,7 @@ async function runOpenAICompatibleLoop(
           messages: [{ role: 'system', content: systemPrompt }, ...currentOpenAIConversation],
           tools: openaiTools,
           tool_choice: 'auto',
-          max_tokens: 900
+          max_tokens: 2048
         }),
         signal
       });
@@ -822,4 +987,64 @@ async function runOpenAICompatibleLoop(
     safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: 'AI Error: ' + err.message });
     safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Error' });
   }
+}
+
+const OPENAI_COMPATIBLE: Record<string, { url: string; key: keyof AuthConfig; model: keyof AuthConfig }> = {
+  togetherai: { url: 'https://api.together.xyz/v1/chat/completions', key: 'togetherApiKey', model: 'togetherModel' },
+  openrouter: { url: 'https://openrouter.ai/api/v1/chat/completions', key: 'openrouterApiKey', model: 'openrouterModel' },
+  groq: { url: 'https://api.groq.com/openai/v1/chat/completions', key: 'groqApiKey', model: 'groqModel' },
+};
+
+/**
+ * One prompt in, text out, no tools and no conversation history. Used by
+ * ECHO Writer. Throws when no provider is configured.
+ */
+export async function completeText(system: string, prompt: string, maxTokens = 2000): Promise<string> {
+  const config = await getAuthConfig();
+  const { anthropicClient, geminiClient } = await getClients(config);
+
+  if (config.provider === 'claude') {
+    const r = await anthropicClient!.messages.create({
+      model: config.anthropicModel!, max_tokens: maxTokens, system,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    if (r.stop_reason === 'refusal') throw new Error('Claude declined to edit this text.');
+    return r.content.filter((b): b is Anthropic.TextBlock => b.type === 'text').map(b => b.text).join('').trim();
+  }
+
+  if (config.provider === 'gemini') {
+    let lastError = '';
+    for (const m of [...new Set([config.geminiModel!, ...GEMINI_FALLBACKS])]) {
+      try {
+        const r = await geminiClient!.models.generateContent({
+          model: m, contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          config: { systemInstruction: system, maxOutputTokens: maxTokens },
+        });
+        return String(r.text || '').trim();
+      } catch (e: any) {
+        lastError = String(e?.message ?? e);
+        if (!/404|NOT_FOUND|429|RESOURCE_EXHAUSTED|quota/i.test(lastError)) break;
+      }
+    }
+    throw new Error(friendlyGeminiError(lastError));
+  }
+
+  const p = OPENAI_COMPATIBLE[config.provider];
+  const res = await fetch(p.url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config[p.key]}`,
+      'HTTP-Referer': 'https://echo-extension',
+      'X-Title': 'ECHO Browser Assistant',
+    },
+    body: JSON.stringify({
+      model: config[p.model],
+      messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
+      max_tokens: maxTokens,
+    }),
+  });
+  if (!res.ok) throw new Error(`API Error ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+  return String(data.choices?.[0]?.message?.content || '').trim();
 }

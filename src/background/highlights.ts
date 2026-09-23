@@ -52,6 +52,20 @@ export async function deleteHighlight(id: string): Promise<void> {
   await idbDelete(STORE_HIGHLIGHTS, id);
 }
 
+/** Delete every highlight saved on a site (www-insensitive). Returns the count. */
+export async function forgetHighlightsForHost(hostname: string): Promise<number> {
+  const host = hostname.toLowerCase().replace(/^www\./, '');
+  let removed = 0;
+  for (const h of await allHighlights()) {
+    let hHost = '';
+    try { hHost = new URL(h.url).hostname.toLowerCase().replace(/^www\./, ''); } catch { continue; }
+    if (hHost !== host) continue;
+    await idbDelete(STORE_HIGHLIGHTS, h.id);
+    removed++;
+  }
+  return removed;
+}
+
 export async function clearHighlights(): Promise<void> {
   await idbClear(STORE_HIGHLIGHTS);
 }

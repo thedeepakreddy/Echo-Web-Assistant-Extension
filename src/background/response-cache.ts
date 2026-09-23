@@ -23,10 +23,10 @@ const MAX_ENTRIES = 400;
 export function ttlFor(query: string): number {
   const MIN = 60_000;
   const q = query.toLowerCase();
+  // Time-sensitive page summaries must use the shorter limit too.
+  if (/price|stock|score|weather|news|today|now|latest|current/.test(q)) return 3 * MIN;
   // Page-derived answers go stale as the page changes.
   if (/summar|what.*(this|page)|tldr|key point|main point|explain this/.test(q)) return 15 * MIN;
-  // Anything time-sensitive should barely cache at all.
-  if (/price|stock|score|weather|news|today|now|latest|current/.test(q)) return 3 * MIN;
   // Stable factual/how-to answers.
   return 24 * 60 * MIN;
 }
@@ -47,18 +47,32 @@ function isPageScoped(query: string): boolean {
   return /\b(this|page|here|article|site|screen|tab)\b/.test(query.toLowerCase());
 }
 
-function makeKey(url: string, normalized: string): string {
-  const scope = isPageScoped(normalized) ? stripUrl(url) : '*';
+function makeKey(url: string, rawQuery: string, normalized: string): string {
+  // Decide scope from the ORIGINAL question; normalization removes "this".
+  const scope = isPageScoped(rawQuery) ? stripUrl(url) : '*';
   return `${scope}::${normalized}`;
 }
 
 function stripUrl(url: string): string {
   try {
     const u = new URL(url);
-    return u.origin + u.pathname; // ignore query/hash noise
+    return u.origin + u.pathname + u.search + u.hash;
   } catch {
     return url || '*';
   }
+}
+
+/** Never replay an instruction as though it were merely an answer. */
+export function isCacheableQuery(query: string): boolean {
+  const q = query.toLowerCase().trim();
+  if (!q) return false;
+  if (/\b(click|open|type|send|submit|navigate|download|fill|delete|close|run|watch|record|remember|save|highlight|scroll|press|switch|buy|book|order|schedule)\b/.test(q)) return false;
+  return /^(what|who|when|where|why|how|is|are|does|do|can|could|which|summari[sz]e|summarise|explain|tldr|tl;dr|key points?|main points?|compare)\b/.test(q);
+}
+
+function safePageScope(query: string, url: string): boolean {
+  if (!isPageScoped(query)) return true;
+  return /^https?:/i.test(url) && !/[?&#/](token|key|code|session|auth|password|secret)=/i.test(url);
 }
 
 /** Word-overlap similarity, 0..1. */
@@ -75,11 +89,12 @@ export interface CacheHit { answer: string; exact: boolean; ageMs: number }
 
 /** Look for a still-valid answer to this question. */
 export async function cacheLookup(query: string, url: string): Promise<CacheHit | null> {
+  if (!isCacheableQuery(query) || !safePageScope(query, url)) return null;
   const norm = normalizeQuery(query);
   if (!norm) return null;
   const now = Date.now();
 
-  const exact = await idbGet<CacheEntry>(STORE_CACHE, makeKey(url, norm));
+  const exact = await idbGet<CacheEntry>(STORE_CACHE, makeKey(url, query, norm));
   if (exact && exact.expires > now) {
     exact.hits = (exact.hits || 0) + 1;
     idbPut(STORE_CACHE, exact);
@@ -88,7 +103,9 @@ export async function cacheLookup(query: string, url: string): Promise<CacheHit 
 
   // Near-miss: same page, ≥72 % word overlap. Tight enough to avoid answering
   // a different question, loose enough to absorb rephrasing.
-  const scope = isPageScoped(norm) ? stripUrl(url) : '*';
+  // Near-miss reuse on pages is too risky: a changed article can look similar.
+  if (isPageScoped(query)) return null;
+  const scope = '*';
   const all = await idbGetAll<CacheEntry>(STORE_CACHE, MAX_ENTRIES);
   let best: CacheEntry | null = null;
   let bestScore = 0;
@@ -108,14 +125,15 @@ export async function cacheLookup(query: string, url: string): Promise<CacheHit 
 
 /** Store an answer produced by a paid tier. */
 export async function cacheStore(query: string, url: string, answer: string): Promise<void> {
+  if (!isCacheableQuery(query) || !safePageScope(query, url)) return;
   const norm = normalizeQuery(query);
   if (!norm || !answer || answer.length < 8) return;
   // Errors and refusals must never be replayed as if they were answers.
-  if (/^(ai |claude |gemini |auth\/init |api )?error/i.test(answer.trim())) return;
+  if (/^(ai |claude |gemini |auth\/init |api )?error|^(your gemini key|gemini's rate limit|that gemini api key|none of the gemini|rate limit reached|no .*api key|that took more steps|i couldn't complete)/i.test(answer.trim())) return;
 
   const now = Date.now();
   const entry: CacheEntry = {
-    key: makeKey(url, norm),
+    key: makeKey(url, query, norm),
     url: stripUrl(url),
     query: norm,
     raw: query,
@@ -133,7 +151,7 @@ export async function cacheClear(): Promise<void> {
 }
 
 export async function cacheForget(url: string, query: string): Promise<void> {
-  await idbDelete(STORE_CACHE, makeKey(url, normalizeQuery(query)));
+  await idbDelete(STORE_CACHE, makeKey(url, query, normalizeQuery(query)));
 }
 
 /** Drop everything expired. Cheap housekeeping, safe to call any time. */
