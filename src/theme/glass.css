@@ -1,0 +1,162 @@
+/*
+ * ECHO design tokens — "liquid glass" with a quiet HUD accent.
+ *
+ * One material everywhere: the in-page HUD and command bar, the chat panel,
+ * the settings page and the approval prompt. Everything is a custom property
+ * on `.echo-theme`, so the content script never leaks rules into the host
+ * page, and the character in use recolours every surface by overriding the
+ * --e-accent family (see themeVars() in src/characters/index.ts).
+ */
+.echo-theme {
+  /* Character palette (defaults: Echo). */
+  --e-accent: #b8a1ff;
+  --e-accent-2: #ff9fd0;
+  --e-listening: #7fd6ff;
+  --e-thinking: #a78bfa;
+  --e-speaking: #ffb0d8;
+  --e-error: #ff6b6b;
+  --e-blob-1: #4c3a9e;
+  --e-blob-2: #9c3f7d;
+  --e-blob-3: #23458f;
+
+  /* Type: the system face first, on one consistent scale. */
+  --e-font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --e-font-display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --e-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --e-t-title: 600 22px/1.2 var(--e-font-display);
+  --e-t-heading: 600 15px/1.3 var(--e-font-display);
+  --e-t-body: 400 13px/1.45 var(--e-font);
+  --e-t-label: 500 13px/1.3 var(--e-font);
+  --e-t-small: 400 12px/1.4 var(--e-font);
+  --e-t-caption: 400 11px/1.35 var(--e-font);
+  --e-t-overline: 600 10.5px/1.2 var(--e-font);
+
+  --e-text: rgba(255, 255, 255, 0.95);
+  --e-text-2: rgba(235, 240, 255, 0.66);
+  --e-text-3: rgba(235, 240, 255, 0.42);
+  --e-hairline: rgba(255, 255, 255, 0.09);
+
+  /* The glass itself: deep blur with vibrancy, a faint vertical light, a
+     bright top rim, and layered soft shadows. */
+  --e-glass-blur: blur(30px) saturate(190%);
+  --e-glass-fill:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.03) 55%, rgba(255, 255, 255, 0.05)),
+    rgba(20, 22, 32, 0.56);
+  --e-glass-fill-strong:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02) 55%, rgba(255, 255, 255, 0.04)),
+    rgba(16, 18, 26, 0.78);
+  --e-glass-rim: rgba(255, 255, 255, 0.14);
+  --e-glass-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04),
+    0 1px 2px rgba(0, 0, 0, 0.22),
+    0 12px 32px rgba(0, 0, 0, 0.28),
+    0 32px 64px rgba(0, 0, 0, 0.2);
+  /* Specular sheen across the top-left, like light on a curved lens. */
+  --e-sheen: radial-gradient(120% 70% at 15% -12%, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 55%);
+  /* Edge light for the ::before rim on large panels: bright where light
+     strikes the glass (top-left) and again at the far edge (bottom-right). */
+  --e-rim: linear-gradient(135deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.08) 30%,
+    rgba(255, 255, 255, 0.02) 60%, rgba(255, 255, 255, 0.22));
+
+  /* Bubble controls: a small glass lozenge with its own highlight. */
+  --e-bubble-fill:
+    radial-gradient(140% 110% at 30% -10%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.04) 52%, rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.035);
+  --e-bubble-fill-hover:
+    radial-gradient(140% 110% at 30% -10%, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0.07) 52%, rgba(255, 255, 255, 0.04)),
+    rgba(255, 255, 255, 0.055);
+  --e-bubble-rim: rgba(255, 255, 255, 0.12);
+  --e-bubble-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.16),
+    0 1px 2px rgba(0, 0, 0, 0.2);
+  /* Filled accent bubble (primary actions, the user's messages). */
+  --e-accent-fill:
+    radial-gradient(120% 95% at 30% -5%, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0) 55%),
+    linear-gradient(135deg, var(--e-accent), var(--e-accent-2));
+  --e-accent-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.08),
+    0 4px 14px color-mix(in srgb, var(--e-accent) 32%, transparent);
+  --e-on-accent: #130c24;
+
+  /* Inputs sit into the glass rather than on it. */
+  --e-field-fill: rgba(0, 0, 0, 0.24);
+  --e-field-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.34), inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+  --e-focus: 0 0 0 3px color-mix(in srgb, var(--e-accent) 30%, transparent);
+
+  --e-r-xl: 26px;
+  --e-r-lg: 20px;
+  --e-r-md: 14px;
+  --e-r-sm: 10px;
+
+  /* Calm spring for presses; smooth ease for everything else. */
+  --e-spring: cubic-bezier(0.34, 1.35, 0.55, 1);
+  --e-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* ---- extension pages (chat panel, settings) ---- */
+html:has(> body.echo-page) { background: #07070c; }
+body.echo-page {
+  margin: 0;
+  min-height: 100vh;
+  /* Transparent so the colour fields below (z-index -1/-2) show through;
+     the base colour sits on <html>. */
+  background: transparent;
+  color: var(--e-text);
+  font: var(--e-t-body);
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+/* Slow colour fields behind the glass give it something to refract. */
+body.echo-page::before {
+  content: '';
+  position: fixed;
+  inset: -25%;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(42% 36% at 16% 20%, var(--e-blob-1), transparent 72%),
+    radial-gradient(38% 34% at 88% 34%, color-mix(in srgb, var(--e-blob-2) 85%, transparent), transparent 72%),
+    radial-gradient(50% 42% at 45% 98%, var(--e-blob-3), transparent 72%);
+  filter: blur(40px) saturate(130%);
+  opacity: 0.85;
+  animation: e-drift 32s ease-in-out infinite alternate;
+}
+/* A faint HUD grid, fading out toward the edges. */
+body.echo-page::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 28px 28px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 20%, transparent 80%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 20%, transparent 80%);
+}
+@keyframes e-drift {
+  0% { transform: translate3d(0, 0, 0) rotate(0deg) scale(1); }
+  50% { transform: translate3d(3%, -2%, 0) rotate(8deg) scale(1.05); }
+  100% { transform: translate3d(-3%, 2%, 0) rotate(-6deg) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.echo-page::before { animation: none; }
+}
+
+body.echo-page ::selection { background: color-mix(in srgb, var(--e-accent) 40%, transparent); }
+body.echo-page ::-webkit-scrollbar { width: 10px; height: 10px; }
+body.echo-page ::-webkit-scrollbar-track { background: transparent; }
+body.echo-page ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border: 3px solid transparent;
+  border-radius: 10px;
+  background-clip: padding-box;
+}
+body.echo-page ::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.22); }

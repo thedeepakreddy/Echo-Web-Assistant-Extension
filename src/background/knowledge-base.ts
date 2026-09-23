@@ -41,17 +41,40 @@ function domainOf(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
+const TRACKING_PARAM = /^(utm_\w+|fbclid|gclid|dclid|msclkid|mc_[ce]id|ref|ref_src|igshid|si)$/i;
+const SECRET_PARAM = /^(code|state|access_?token|id_?token|refresh_?token|token|api_?key|key|session|sid|secret|password|signature|sig)$/i;
+
+/**
+ * One key per page: tracking parameters and in-page anchors are dropped so the
+ * same article is stored once, but meaningful query strings (?id=, ?q=) and
+ * hash routes (#/path, #!/path) are kept because they select different content.
+ */
 function cleanUrl(url: string): string {
-  try { const u = new URL(url); return u.origin + u.pathname; } catch { return url; }
+  try {
+    const u = new URL(url);
+    for (const key of [...u.searchParams.keys()]) if (TRACKING_PARAM.test(key)) u.searchParams.delete(key);
+    u.searchParams.sort();
+    const hash = /^#!?\//.test(u.hash) ? u.hash : '';
+    return u.origin + u.pathname + u.search + hash;
+  } catch { return url; }
 }
 
 /** Should this page be remembered at all? */
 export function isIndexable(url: string): boolean {
   if (!url) return false;
   if (!/^https?:/i.test(url)) return false;
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return false; }
+  if (/^(mail\.google\.com|docs\.google\.com|drive\.google\.com|(?:[a-z0-9-]+\.)*outlook\.[a-z.]+|(?:[a-z0-9-]+\.)*slack\.com|(?:[a-z0-9-]+\.)*notion\.so)$/.test(host)) return false;
   // Never store anything that looks private or authenticated.
-  if (/\b(login|signin|signup|register|password|checkout|payment|billing|account\/|auth|oauth|token)\b/i.test(url)) return false;
+  if (/\b(login|signin|signup|register|password|checkout|payment|billing|account|auth|oauth|token|session|secret|inbox)\b/i.test(url)) return false;
   if (/localhost|127\.0\.0\.1|\.local\b/i.test(url)) return false;
+  // OAuth callbacks (?code=&state=), magic links and signed URLs carry secrets.
+  try {
+    const u = new URL(url);
+    if ([...u.searchParams.keys()].some(k => SECRET_PARAM.test(k))) return false;
+    if (/[#&](access_?token|id_?token|code|state|token|session)=/i.test(u.hash)) return false;
+  } catch { return false; }
   return true;
 }
 
@@ -143,6 +166,18 @@ export async function getPage(url: string): Promise<KBPage | null> {
 
 export async function forgetPage(url: string): Promise<void> {
   await idbDelete(STORE_KB, cleanUrl(url));
+}
+
+export async function forgetSite(hostname: string): Promise<number> {
+  const host = hostname.toLowerCase().replace(/^www\./, '');
+  const pages = await idbGetAll<KBPage>(STORE_KB, MAX_PAGES);
+  let removed = 0;
+  for (const page of pages) {
+    if (page.domain !== host) continue;
+    await idbDelete(STORE_KB, page.url);
+    removed++;
+  }
+  return removed;
 }
 
 export async function clearKB(): Promise<void> {

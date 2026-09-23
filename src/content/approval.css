@@ -1,0 +1,140 @@
+/*
+ * Approval prompt, in ECHO's glass style.
+ *
+ * SECURITY: Allow only arms while IntersectionObserver v2 reports #box as
+ * fully visible, and Chrome reports false when #box or any ancestor has a
+ * filter, backdrop-filter, transform, mask or opacity below 1. So nothing
+ * here (or on the host page's #echo-approval-box) may use those: the glass
+ * look comes from gradients, rims and shadows only.
+ */
+html, body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+}
+body {
+  color: var(--e-text);
+  font: var(--e-t-body);
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Apple's system orange marks this as a caution prompt; the character's
+   accent tints the edge light. */
+#box {
+  --caution: #ff9f0a;
+  --caution-2: #ffcc4d;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 14px 14px 12px;
+  border-radius: 20px;
+  border: 1px solid color-mix(in srgb, var(--caution) 42%, rgba(255, 255, 255, 0.14));
+  background:
+    radial-gradient(120% 70% at 15% -12%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 55%),
+    radial-gradient(90% 80% at 100% 0%, color-mix(in srgb, var(--e-accent) 22%, transparent), transparent 60%),
+    radial-gradient(80% 70% at 0% 100%, color-mix(in srgb, var(--caution) 15%, transparent), transparent 65%),
+    linear-gradient(180deg, #25222e, #16151d);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+
+.head { display: flex; align-items: center; gap: 11px; }
+.badge {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: #2a1700;
+  background:
+    radial-gradient(120% 95% at 30% -5%, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 55%),
+    linear-gradient(135deg, var(--caution-2), var(--caution));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 0 0 4px color-mix(in srgb, var(--caution) 16%, transparent), 0 4px 14px rgba(255, 159, 10, 0.3);
+}
+.badge svg { width: 18px; height: 18px; }
+.titles { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: var(--e-t-overline);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--e-text-2);
+}
+.label::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--caution);
+  box-shadow: 0 0 8px var(--caution);
+}
+#box strong { font: var(--e-t-heading); letter-spacing: -0.018em; color: var(--e-text); }
+
+#detail {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 8px 11px;
+  border-radius: 12px;
+  background: var(--e-field-fill);
+  box-shadow: var(--e-field-shadow);
+  color: var(--e-text);
+  font: var(--e-t-small);
+}
+
+/* Arming: a hairline that fills while Allow waits to unlock. */
+.arming { height: 2px; border-radius: 2px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.arming i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--caution-2), var(--caution));
+  box-shadow: 0 0 8px var(--caution);
+}
+#box.arming-run .arming i { width: 100%; transition: width 700ms linear; }
+#box.armed .arming i { width: 100%; }
+
+.foot { display: flex; align-items: center; gap: 8px; }
+#hint { flex: 1; min-width: 0; color: var(--e-text-3); font: var(--e-t-caption); }
+button {
+  flex: none;
+  height: 30px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font: 600 12.5px/1 var(--e-font);
+  cursor: pointer;
+  color: var(--e-text);
+  background: var(--e-bubble-fill);
+  border: 1px solid var(--e-bubble-rim);
+  box-shadow: var(--e-bubble-shadow);
+  transition: background 0.2s var(--e-ease), box-shadow 0.2s var(--e-ease);
+}
+button:hover:not(:disabled) { background: var(--e-bubble-fill-hover); }
+button:focus-visible { outline: none; box-shadow: var(--e-bubble-shadow), 0 0 0 3px color-mix(in srgb, var(--caution) 35%, transparent); }
+#allow {
+  color: #2a1700;
+  border-color: transparent;
+  background:
+    radial-gradient(120% 95% at 30% -5%, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 55%),
+    linear-gradient(135deg, var(--caution-2), var(--caution));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 3px 12px color-mix(in srgb, var(--caution) 38%, transparent);
+}
+/* Disabled without opacity (see the note at the top). */
+button:disabled {
+  cursor: not-allowed;
+  color: var(--e-text-3);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+}

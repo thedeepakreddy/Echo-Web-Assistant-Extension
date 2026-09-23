@@ -16,7 +16,7 @@
   width: var(--size);
   height: var(--size);
   z-index: 2147483647;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: var(--e-font);
   user-select: none;
   
   display: flex;
@@ -28,94 +28,311 @@
   box-sizing: border-box;
 }
 
-/* ---- log box (temporary toast messages) ---- */
+/* ---- log box (ECHO's latest line, shown as a glass speech bubble) ---- */
 #echo-root-wrapper #echo-log-box {
   position: absolute;
   bottom: calc(var(--size) + 12px);
   right: calc(var(--size) + 12px);
   width: max-content;
-  max-width: 250px;
-  background: rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(4px);
-  border: 1px solid var(--glow);
-  padding: 8px 12px;
-  border-radius: 8px;
-  color: #fff;
+  max-width: 260px;
+  padding: 10px 14px;
+  border-radius: 18px;
+  background: var(--e-sheen), var(--e-glass-fill-strong);
+  border: 1px solid var(--e-glass-rim);
+  box-shadow: var(--e-glass-shadow), 0 0 0 0.5px color-mix(in srgb, var(--glow) 30%, transparent);
+  backdrop-filter: var(--e-glass-blur);
+  -webkit-backdrop-filter: var(--e-glass-blur);
+  color: var(--e-text);
+  font-family: var(--e-font);
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 1.45;
+  letter-spacing: -0.005em;
   pointer-events: none;
   opacity: 0;
-  transform: translateY(10px) scale(0.96);
-  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  transform: translateY(6px) scale(0.97);
+  transition: opacity 0.25s var(--e-ease), transform 0.35s var(--e-spring);
 }
 
 #echo-root-wrapper #echo-log-box.visible {
   opacity: 1;
-  transform: translateY(0) scale(1);
+  transform: none;
 }
 
-/* ---- chat box (long-press the core to reveal) ---- */
+/* ---- command bar (long-press ECHO or Cmd/Ctrl+Shift+K) ----
+   Liquid glass with a quiet HUD accent: a status light, small-caps label and
+   hairline corner marks, all tinted by the current status colour. */
 #echo-root-wrapper #echo-chat-box {
+  --hud-line: color-mix(in srgb, var(--glow) 50%, transparent);
   position: absolute;
-  bottom: calc(var(--size) + 12px); /* pop up above reactor */
+  bottom: calc(100% + 12px);
   right: 0;
-  width: 300px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  border-radius: 999px;
-  background: rgba(10, 20, 24, 0.88);
-  border: 1px solid color-mix(in srgb, var(--glow) 45%, transparent);
-  box-shadow:
-    0 0 18px color-mix(in srgb, var(--glow) 30%, transparent),
-    0 10px 30px rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(18px) saturate(1.2);
-  -webkit-backdrop-filter: blur(18px) saturate(1.2);
-  transition: all 0.2s ease-out;
+  width: 396px;
+  padding: 14px 14px 10px;
+  border-radius: var(--e-r-xl);
+  background: var(--e-sheen), var(--e-glass-fill);
+  border: 1px solid var(--e-glass-rim);
+  box-shadow: var(--e-glass-shadow), 0 0 40px color-mix(in srgb, var(--glow) 12%, transparent);
+  backdrop-filter: var(--e-glass-blur);
+  -webkit-backdrop-filter: var(--e-glass-blur);
+  color: var(--e-text);
+  font: var(--e-t-body);
+  letter-spacing: -0.006em;
+  text-align: left;
+  transform-origin: 85% 100%;
+  transition: opacity 0.2s var(--e-ease), transform 0.42s var(--e-spring);
 }
-
+/* Edge light: the rim brightens where light strikes the glass. */
+#echo-root-wrapper #echo-chat-box::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: var(--e-rim);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+#echo-root-wrapper #echo-chat-box.below { bottom: auto; top: calc(100% + 12px); transform-origin: 85% 0; }
+#echo-root-wrapper #echo-chat-box.align-left { right: auto; left: 0; }
 #echo-root-wrapper #echo-chat-box:not(.visible) {
   opacity: 0;
   pointer-events: none;
-  transform: translateY(10px) scale(0.96);
+  transform: translateY(10px) scale(0.94);
+}
+#echo-root-wrapper #echo-chat-box button {
+  font: inherit;
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* Hairline corner marks, set just inside the rounded edge. */
+#echo-root-wrapper #echo-chat-box .hud-corner {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 0 solid var(--hud-line);
+  pointer-events: none;
+}
+#echo-root-wrapper #echo-chat-box .hud-corner.tl { top: 7px; left: 7px; border-top-width: 1.5px; border-left-width: 1.5px; border-top-left-radius: 4px; }
+#echo-root-wrapper #echo-chat-box .hud-corner.tr { top: 7px; right: 7px; border-top-width: 1.5px; border-right-width: 1.5px; border-top-right-radius: 4px; }
+#echo-root-wrapper #echo-chat-box .hud-corner.bl { bottom: 7px; left: 7px; border-bottom-width: 1.5px; border-left-width: 1.5px; border-bottom-left-radius: 4px; }
+#echo-root-wrapper #echo-chat-box .hud-corner.br { bottom: 7px; right: 7px; border-bottom-width: 1.5px; border-right-width: 1.5px; border-bottom-right-radius: 4px; }
+
+#echo-root-wrapper .cmd-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 12px 6px;
+}
+#echo-root-wrapper .cmd-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--glow);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--glow) 18%, transparent), 0 0 10px var(--glow);
+  animation: cmd-pulse 2.4s ease-in-out infinite;
+}
+#echo-root-wrapper .cmd-title {
+  font-family: var(--e-font-display);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  color: var(--e-text);
+}
+#echo-root-wrapper .cmd-status {
+  flex: 1;
+  font-size: 12px;
+  color: var(--e-text-2);
+}
+@keyframes cmd-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+#echo-root-wrapper .cmd-icon-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--e-text-2);
+  cursor: pointer;
+  transition: background 0.2s var(--e-ease), color 0.2s var(--e-ease), transform 0.3s var(--e-spring);
+}
+#echo-root-wrapper .cmd-icon-btn:hover {
+  color: var(--e-text);
+  background: var(--e-bubble-fill-hover);
+  border-color: var(--e-bubble-rim);
+  box-shadow: var(--e-bubble-shadow);
+}
+#echo-root-wrapper .cmd-icon-btn:active { transform: scale(0.9); }
+#echo-root-wrapper .cmd-icon-btn:focus-visible,
+#echo-root-wrapper .cmd-chip:focus-visible,
+#echo-root-wrapper #echo-send-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--e-focus);
+}
+
+#echo-root-wrapper .cmd-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 5px 5px 5px 6px;
+  border-radius: 18px;
+  background: var(--e-field-fill);
+  box-shadow: var(--e-field-shadow);
+  transition: box-shadow 0.2s var(--e-ease);
+}
+#echo-root-wrapper .cmd-input-row:focus-within {
+  box-shadow: var(--e-field-shadow), var(--e-focus);
+}
+#echo-root-wrapper .cmd-mic.live {
+  color: var(--e-on-accent);
+  background: var(--glow);
+  border-color: transparent;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--glow) 22%, transparent), 0 0 16px var(--glow);
+  animation: cmd-pulse 1.2s ease-in-out infinite;
 }
 
 #echo-root-wrapper #input {
   flex: 1;
   min-width: 0;
+  height: 32px;
+  margin: 0;
+  padding: 0 2px;
   border: none;
   outline: none;
   background: transparent;
-  color: #e8f4ff;
+  color: var(--e-text);
+  font: inherit;
   font-size: 14px;
+  letter-spacing: -0.01em;
+  box-shadow: none;
 }
 #echo-root-wrapper #input::placeholder {
-  color: rgba(232, 244, 255, 0.4);
+  color: var(--e-text-3);
 }
 
 #echo-root-wrapper #echo-send-btn {
   flex: none;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-  color: #04222b;
-  background: var(--glow);
-  box-shadow: 0 0 12px color-mix(in srgb, var(--glow) 60%, transparent);
-  font-size: 12px;
+  width: 34px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform 120ms ease;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--e-on-accent);
+  background: var(--e-accent-fill);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 2px 10px color-mix(in srgb, var(--e-accent) 45%, transparent);
+  transition: transform 0.3s var(--e-spring), opacity 0.2s var(--e-ease), filter 0.2s var(--e-ease);
 }
-#echo-root-wrapper #echo-send-btn:hover {
-  transform: scale(1.08);
+#echo-root-wrapper #echo-send-btn:hover:not(:disabled) { filter: brightness(1.08); transform: scale(1.05); }
+#echo-root-wrapper #echo-send-btn:active:not(:disabled) { transform: scale(0.9); }
+#echo-root-wrapper #echo-send-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+  box-shadow: none;
 }
-#echo-root-wrapper #echo-send-btn:active {
-  transform: scale(0.94);
+#echo-root-wrapper #echo-send-btn.stop {
+  color: #fff;
+  background:
+    radial-gradient(120% 95% at 30% -5%, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0) 55%),
+    linear-gradient(135deg, #ff5f57, #e0383e);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 2px 10px rgba(224, 56, 62, 0.45);
+}
+
+#echo-root-wrapper .cmd-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 7px;
+  margin-top: 12px;
+}
+#echo-root-wrapper .cmd-chip {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  min-width: 0;
+  height: 40px;
+  padding: 0 8px 0 6px;
+  border-radius: 14px;
+  border: 1px solid var(--e-bubble-rim);
+  background: var(--e-bubble-fill);
+  box-shadow: var(--e-bubble-shadow);
+  color: var(--e-text);
+  font: var(--e-t-label);
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.2s var(--e-ease), box-shadow 0.2s var(--e-ease), transform 0.35s var(--e-spring);
+}
+#echo-root-wrapper .cmd-chip-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 9px;
+  background:
+    radial-gradient(120% 100% at 30% 0%, rgba(255, 255, 255, 0.22), transparent 60%),
+    color-mix(in srgb, var(--glow) 20%, transparent);
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--glow) 45%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+#echo-root-wrapper .cmd-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#echo-root-wrapper .cmd-chip svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--glow);
+}
+#echo-root-wrapper .cmd-chip:hover:not(:disabled) {
+  background: var(--e-bubble-fill-hover);
+  box-shadow: var(--e-bubble-shadow), 0 4px 14px rgba(0, 0, 0, 0.2);
+  transform: translateY(-1px);
+}
+#echo-root-wrapper .cmd-chip:active:not(:disabled) { transform: scale(0.95); }
+#echo-root-wrapper .cmd-chip:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+#echo-root-wrapper .cmd-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  padding: 10px 6px 2px;
+  font: var(--e-t-caption);
+  color: var(--e-text-3);
+}
+#echo-root-wrapper .cmd-foot kbd {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--e-bubble-fill);
+  box-shadow: var(--e-bubble-shadow);
+  color: var(--e-text-2);
+  font: 500 10px/1.4 var(--e-font);
+}
+#echo-root-wrapper .cmd-foot-sep {
+  width: 3px;
+  height: 3px;
+  margin: 0 4px;
+  border-radius: 50%;
+  background: var(--e-text-3);
 }
 
 /* ---- reactor shell ---- */
@@ -226,17 +443,17 @@
   to { transform: rotate(360deg); }
 }
 
-/* ---- status colors ---- */
+/* ---- status colours (from the current character's theme) ---- */
 #echo-root-wrapper[data-status="idle"] {
-  --glow: #52fefe;
+  --glow: var(--e-accent);
   --spin: 9s;
 }
 #echo-root-wrapper[data-status="listening"] {
-  --glow: #52fefe;
+  --glow: var(--e-listening);
   --spin: 4s;
 }
 #echo-root-wrapper[data-status="thinking"] {
-  --glow: #b388ff;
+  --glow: var(--e-thinking);
   --spin: 2s;
 }
 #echo-root-wrapper[data-status="acting"] {
@@ -244,11 +461,11 @@
   --spin: 1.1s;
 }
 #echo-root-wrapper[data-status="speaking"] {
-  --glow: #ffd479;
+  --glow: var(--e-speaking);
   --spin: 3s;
 }
 #echo-root-wrapper[data-status="error"] {
-  --glow: #ff6b6b;
+  --glow: var(--e-error);
   --spin: 0s;
 }
 
@@ -280,6 +497,201 @@
   100% { opacity: 0.35; }
 }
 
+/* ---- character avatar (replaces the reactor when chosen in settings) ---- */
+#echo-root-wrapper.avatar-mode {
+  --size: 184px;
+  width: 184px;
+  height: 230px;
+}
+
+/* The log becomes a speech bubble beside her face. */
+#echo-root-wrapper.avatar-mode #echo-log-box {
+  bottom: auto;
+  top: 26%;
+  right: calc(100% - 6px);
+  transform-origin: right center;
+}
+
+#echo-root-wrapper .echo-avatar {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  perspective: 700px;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.35));
+}
+
+/* Page stylesheets love to restyle <img>; pin everything down. */
+#echo-root-wrapper .echo-avatar .av-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 1;
+  filter: none;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+#echo-root-wrapper .echo-avatar .av-layer.av-frame {
+  visibility: hidden;
+}
+#echo-root-wrapper .echo-avatar .av-torso,
+#echo-root-wrapper .echo-avatar .av-head,
+#echo-root-wrapper .echo-avatar .av-eyes {
+  position: absolute;
+  inset: 0;
+}
+#echo-root-wrapper .echo-avatar .av-torso {
+  transform-origin: 50% 100%;
+  will-change: transform;
+}
+#echo-root-wrapper .echo-avatar .av-head {
+  will-change: transform;
+}
+#echo-root-wrapper .echo-avatar .av-eyes {
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+/* Status halo behind her head, in the reactor's status colours. */
+#echo-root-wrapper .echo-avatar .av-glow {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  top: 0;
+  height: 72%;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--glow) 55%, transparent), transparent);
+  opacity: 0.2;
+  transition: opacity 400ms ease;
+  pointer-events: none;
+}
+#echo-root-wrapper[data-status="listening"] .av-glow { opacity: 0.9; animation: av-halo 1.4s ease-in-out infinite; }
+#echo-root-wrapper[data-status="thinking"] .av-glow { opacity: 0.8; animation: av-halo 0.9s ease-in-out infinite; }
+#echo-root-wrapper[data-status="speaking"] .av-glow { opacity: 0.55; }
+#echo-root-wrapper[data-status="error"] .av-glow { opacity: 0.9; }
+@keyframes av-halo {
+  0%, 100% { transform: scale(0.92); }
+  50% { transform: scale(1.06); }
+}
+
+/* Thought cloud above her head while ECHO is thinking. */
+#echo-root-wrapper .echo-avatar .av-thought {
+  position: absolute;
+  left: -22%;
+  bottom: 93%;
+  width: 104px;
+  height: 70px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(8px) scale(0.6);
+  transform-origin: 80% 100%;
+  transition: opacity 250ms ease, transform 350ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+#echo-root-wrapper[data-status="thinking"] .echo-avatar .av-thought {
+  opacity: 1;
+  transform: none;
+}
+/* The command bar opens in the same spot; it already says what ECHO is doing. */
+#echo-root-wrapper:has(#echo-chat-box.visible) .echo-avatar .av-thought {
+  display: none;
+}
+#echo-root-wrapper .echo-avatar .av-cloud {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  animation: av-float 3s ease-in-out infinite;
+}
+#echo-root-wrapper .echo-avatar .av-cloud path,
+#echo-root-wrapper .echo-avatar .av-puff {
+  fill: rgba(255, 255, 255, 0.96);
+  background: rgba(255, 255, 255, 0.96);
+  stroke: color-mix(in srgb, var(--glow) 70%, transparent);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--glow) 55%, transparent));
+}
+#echo-root-wrapper .echo-avatar .av-puff {
+  position: absolute;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--glow) 70%, transparent);
+}
+#echo-root-wrapper .echo-avatar .av-puff-1 { width: 13px; height: 13px; right: 12%; bottom: -14%; }
+#echo-root-wrapper .echo-avatar .av-puff-2 { width: 8px; height: 8px; right: 2%; bottom: -34%; }
+#echo-root-wrapper .echo-avatar .av-dot {
+  position: absolute;
+  top: 46%;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--glow);
+  filter: brightness(0.8);
+  animation: av-dot 1.2s ease-in-out infinite;
+}
+#echo-root-wrapper .echo-avatar .av-dot:nth-of-type(1) { left: 30%; }
+#echo-root-wrapper .echo-avatar .av-dot:nth-of-type(2) { left: 46%; animation-delay: 0.18s; }
+#echo-root-wrapper .echo-avatar .av-dot:nth-of-type(3) { left: 62%; animation-delay: 0.36s; }
+@keyframes av-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+@keyframes av-dot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+
+/* Tears of laughter, welling at the outer eye corners and rolling down. */
+#echo-root-wrapper .echo-avatar .av-tear {
+  position: absolute;
+  width: 2.8%;
+  aspect-ratio: 1;
+  margin: 0.4% 0 0 -1.4%;
+  border-radius: 0 50% 50% 50%;
+  background: radial-gradient(circle at 62% 62%, rgba(255, 255, 255, 0.95) 0 16%,
+    rgba(185, 225, 255, 0.92) 30%, rgba(90, 160, 235, 0.8) 85%);
+  box-shadow: 0 0 2px rgba(40, 90, 160, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  display: none;
+}
+#echo-root-wrapper .echo-avatar.laughing .av-tear { display: block; }
+#echo-root-wrapper .echo-avatar.laughing .av-tear-l { animation: av-tear-l 1.3s ease-in infinite; }
+#echo-root-wrapper .echo-avatar.laughing .av-tear-r { animation: av-tear-r 1.3s ease-in infinite; }
+#echo-root-wrapper .echo-avatar.laughing .av-tear-2 { animation-delay: 0.65s; }
+@keyframes av-tear-l {
+  0% { opacity: 0; transform: translate(0, 0) rotate(45deg) scale(0.3); }
+  18% { opacity: 0.95; transform: translate(-20%, 20%) rotate(45deg) scale(1); }
+  80% { opacity: 0.85; transform: translate(-70%, 230%) rotate(45deg) scale(0.9); }
+  100% { opacity: 0; transform: translate(-80%, 290%) rotate(45deg) scale(0.8); }
+}
+@keyframes av-tear-r {
+  0% { opacity: 0; transform: translate(0, 0) rotate(45deg) scale(0.3); }
+  18% { opacity: 0.95; transform: translate(20%, 20%) rotate(45deg) scale(1); }
+  80% { opacity: 0.85; transform: translate(70%, 230%) rotate(45deg) scale(0.9); }
+  100% { opacity: 0; transform: translate(80%, 290%) rotate(45deg) scale(0.8); }
+}
+
+/* Clicks only land on her head and shoulders, not the empty corners. */
+#echo-root-wrapper .echo-avatar .av-hit {
+  position: absolute;
+  left: 14%;
+  right: 14%;
+  top: 4%;
+  bottom: 0;
+  border-radius: 45% 45% 18% 18%;
+  cursor: pointer;
+  touch-action: none;
+}
+
 /* Proactive suggestion toast (Tier 2 passive observer).
    Fixed to the viewport and independent of the orb, so it can appear even
    while ECHO is asleep. */
@@ -292,42 +704,123 @@
   align-items: center;
   gap: 10px;
   max-width: min(560px, calc(100vw - 40px));
-  padding: 11px 12px 11px 16px;
-  background: rgba(19, 22, 32, 0.97);
-  border: 1px solid #2f3646;
-  border-left: 3px solid #4a90e2;
-  border-radius: 12px;
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
-  font: 400 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  color: #e8eaed;
+  padding: 8px 8px 8px 18px;
+  border-radius: 999px;
+  background: var(--e-sheen), var(--e-glass-fill-strong);
+  border: 1px solid var(--e-glass-rim);
+  box-shadow: var(--e-glass-shadow);
+  backdrop-filter: var(--e-glass-blur);
+  -webkit-backdrop-filter: var(--e-glass-blur);
+  font: 400 13px/1.45 var(--e-font);
+  letter-spacing: -0.005em;
+  color: var(--e-text);
   pointer-events: auto;
   z-index: 2147483646;
-  animation: echo-toast-in 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: echo-toast-in 0.45s var(--e-spring);
 }
 @keyframes echo-toast-in {
-  from { opacity: 0; transform: translate(-50%, 14px); }
-  to   { opacity: 1; transform: translate(-50%, 0); }
+  from { opacity: 0; transform: translate(-50%, 16px) scale(0.96); }
+  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
 #echo-suggest-toast .echo-suggest-text { flex: 1; }
 #echo-suggest-toast button {
   flex-shrink: 0;
-  border-radius: 7px;
+  border-radius: 999px;
   cursor: pointer;
-  font: 600 12px -apple-system, BlinkMacSystemFont, sans-serif;
-  transition: filter 0.15s, color 0.15s;
+  font: 600 12.5px var(--e-font);
+  transition: transform 0.3s var(--e-spring), filter 0.2s, color 0.2s;
 }
+#echo-suggest-toast button:active { transform: scale(0.93); }
 #echo-suggest-toast .echo-suggest-yes {
-  background: #4a90e2;
-  color: #fff;
+  color: var(--e-on-accent);
+  background: var(--e-accent-fill);
   border: none;
-  padding: 6px 14px;
+  padding: 7px 16px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
 }
-#echo-suggest-toast .echo-suggest-yes:hover { filter: brightness(1.15); }
+#echo-suggest-toast .echo-suggest-yes:hover { filter: brightness(1.08); }
 #echo-suggest-toast .echo-suggest-no {
-  background: transparent;
-  color: #79839a;
-  border: 1px solid #333b4d;
-  padding: 6px 9px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  background: var(--e-bubble-fill);
+  color: var(--e-text-2);
+  border: 1px solid var(--e-bubble-rim);
+  box-shadow: var(--e-bubble-shadow);
   line-height: 1;
 }
-#echo-suggest-toast .echo-suggest-no:hover { color: #e8eaed; }
+#echo-suggest-toast .echo-suggest-no:hover { color: var(--e-text); }
+
+#echo-approval-box {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: min(320px, calc(100vw - 32px));
+  height: 200px;
+  border-radius: 20px;
+  /* No filter, backdrop-filter, transform or opacity here: the prompt only
+     arms "Allow" while Chrome sees it as fully visible (see approval.css). */
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.25),
+    0 14px 36px rgba(0, 0, 0, 0.35),
+    0 0 0 0.5px rgba(255, 159, 10, 0.35),
+    0 0 28px rgba(255, 159, 10, 0.18);
+  pointer-events: auto;
+  z-index: 2147483647;
+}
+#echo-approval-box iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 20px;
+  background: transparent;
+  color-scheme: normal;
+}
+
+/* ---- ECHO Writer result card ---- */
+#echo-writer-card {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  width: min(380px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  box-sizing: border-box;
+  border-radius: var(--e-r-lg);
+  background: var(--e-sheen), var(--e-glass-fill-strong);
+  border: 1px solid var(--e-glass-rim);
+  box-shadow: var(--e-glass-shadow);
+  backdrop-filter: var(--e-glass-blur);
+  -webkit-backdrop-filter: var(--e-glass-blur);
+  color: var(--e-text);
+  font: 13px/1.5 var(--e-font);
+  letter-spacing: -0.005em;
+  pointer-events: auto;
+  z-index: 2147483647;
+}
+#echo-writer-card .echo-writer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#echo-writer-card strong { color: var(--e-accent); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+#echo-writer-card .echo-writer-x {
+  width: 26px; height: 26px; padding: 0; border-radius: 50%;
+  background: var(--e-bubble-fill); border: 1px solid var(--e-bubble-rim); box-shadow: var(--e-bubble-shadow);
+  color: var(--e-text-2); cursor: pointer; font-size: 11px;
+}
+#echo-writer-card .echo-writer-body { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 20px; }
+#echo-writer-card .echo-writer-muted { color: var(--e-text-2); }
+#echo-writer-card .echo-writer-error { color: #ffb4b4; }
+#echo-writer-card .echo-writer-note { color: var(--e-text-2); font-size: 12px; }
+#echo-writer-card .echo-writer-actions { display: flex; justify-content: flex-end; gap: 8px; }
+#echo-writer-card .echo-writer-actions button {
+  border: 1px solid var(--e-bubble-rim); border-radius: 999px; background: var(--e-bubble-fill); box-shadow: var(--e-bubble-shadow);
+  color: var(--e-text); padding: 7px 16px; cursor: pointer; font: 500 12.5px var(--e-font);
+  transition: transform 0.3s var(--e-spring);
+}
+#echo-writer-card .echo-writer-actions button:active { transform: scale(0.94); }
+#echo-writer-card .echo-writer-actions button.primary {
+  border-color: transparent; background: var(--e-accent-fill); color: var(--e-on-accent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}

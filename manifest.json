@@ -17,8 +17,7 @@
     "sidePanel"
   ],
   "host_permissions": [
-    "<all_urls>",
-    "*://*/*"
+    "<all_urls>"
   ],
 
   "action": {
@@ -37,7 +36,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["*.js", "*.css", "speech.html"],
+      "resources": ["speech.html", "approval.html", "characters/*"],
       "matches": ["<all_urls>"]
     }
   ],
@@ -48,6 +47,9 @@
       "run_at": "document_end"
     }
   ],
+  "omnibox": {
+    "keyword": "echo"
+  },
   "commands": {
     "wake-echo": {
       "suggested_key": {

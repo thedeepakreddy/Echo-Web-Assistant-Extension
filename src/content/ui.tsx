@@ -1,5 +1,42 @@
 import React, { useState, useEffect, useRef } from 'react';
+import '../theme/glass.css';
 import './index.css';
+import { replaceSelection } from './writer';
+import { EchoAvatar, AvatarCues } from './avatar';
+import { CommandBar, QuickAction } from './command-bar';
+import { ICONS } from '../theme/icons';
+import { pickVoice, VoiceGender } from './voice';
+import { REACTOR, DEFAULT_APPEARANCE, characterById, resolveAppearance, themeFor, themeVars } from '../characters';
+
+// The character is taller than the reactor orb, so it needs a bigger box.
+// Characters are 230 px tall and as wide as their own picture's proportions
+// (4:5 for most; wider for one whose shoulders fill a wider frame).
+const boxFor = (appearance: string) => {
+  if (appearance === REACTOR) return { w: 140, h: 140 };
+  const aspect = characterById(appearance)?.layout.aspect || 0.8;
+  return { w: Math.max(184, Math.round(230 * aspect)), h: 230 };
+};
+
+// Replies that should make the character laugh: laughter, jokes, puns, or
+// laughing emoji. Keyword-based, so it errs toward not laughing.
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: 'English', hi: 'Hindi', te: 'Telugu', ta: 'Tamil', bn: 'Bengali', es: 'Spanish', fr: 'French', de: 'German',
+};
+const COMMAND_BAR_H = 250;           // approx. height, to decide whether it opens up or down
+const COMMAND_BAR_W = 396;
+const SELECTION_TTL_MS = 60_000;     // "Explain" uses text selected in the last minute
+
+const FUNNY = /\b(ha(ha)+h?|he(he)+|lol|lmao|rofl|hilarious|joke|jokes|joking|kidding|pun|puns|funny)\b|[\u{1F602}\u{1F923}\u{1F606}\u{1F604}\u{1F639}\u{1F601}]/iu;
+
+interface WriterCard {
+  requestId: string;
+  title: string;
+  state: 'loading' | 'done' | 'error';
+  text?: string;
+  error?: string;
+  canReplace?: boolean;
+  note?: string;
+}
 
 declare global {
   interface Window {
@@ -13,9 +50,39 @@ export function EchoUI() {
   const [status, setStatus] = useState<'idle' | 'listening' | 'thinking' | 'speaking' | 'error'>('idle');
   const [inputText, setInputText] = useState('');
   const [chatVisible, setChatVisible] = useState(false);
+  const chatVisibleRef = useRef(false);
+  useEffect(() => { chatVisibleRef.current = chatVisible; }, [chatVisible]);
+  // Releasing a long press also fires a click; this swallows that one click.
+  const longPressedRef = useRef(false);
+
+  // Esc closes the command bar wherever focus is on the page.
+  useEffect(() => {
+    if (!chatVisible) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setChatVisible(false); };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [chatVisible]);
   const [logText, setLogText] = useState('');
   const [suggestion, setSuggestion] = useState<{ text: string; action: string } | null>(null);
-  const [position, setPosition] = useState({ x: window.innerWidth - 150, y: window.innerHeight - 150 });
+  // Only the id reaches the page DOM; the prompt text and buttons live in an
+  // extension-origin iframe that page scripts cannot read or click.
+  const [approvalId, setApprovalId] = useState<string | null>(null);
+  const [writer, setWriter] = useState<WriterCard | null>(null);
+  const [position, setPosition] = useState({ x: window.innerWidth - 208, y: window.innerHeight - 254 });
+  // A character id, or 'reactor' for the orb.
+  const [appearance, setAppearance] = useState(DEFAULT_APPEARANCE);
+  const character = characterById(appearance);
+  const avatarBoxRef = useRef(boxFor(DEFAULT_APPEARANCE));
+  useEffect(() => { avatarBoxRef.current = boxFor(appearance); }, [appearance]);
+  // The speech handler is registered once, so it reads the voice from a ref.
+  const voiceGenderRef = useRef<VoiceGender | undefined>(characterById(DEFAULT_APPEARANCE)?.voice);
+  useEffect(() => { voiceGenderRef.current = characterById(appearance)?.voice; }, [appearance]);
+  // Chrome loads its voice list lazily; ask early so it is ready for the first reply.
+  useEffect(() => { window.speechSynthesis.getVoices(); }, []);
+  // True only while speech audio plays, so the mouth never moves in silence.
+  const [talking, setTalking] = useState(false);
+  const avatarCueRef = useRef<AvatarCues | null>(null);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const positionRef = useRef(position);
   useEffect(() => { positionRef.current = position; }, [position]);
   const isDraggingRef = useRef(false);
@@ -23,7 +90,21 @@ export function EchoUI() {
   const dragStartMouseRef = useRef({ x: 0, y: 0 });
   const inputRef = useRef<HTMLInputElement>(null);
   const submitBtnRef = useRef<HTMLButtonElement>(null);
+  // This UI sits in the page's DOM, so page scripts can call .click() on it or
+  // requestSubmit() the form. Commands are only sent right after a real
+  // (isTrusted) key press or click from the user.
+  const trustedGestureAtRef = useRef(0);
+  const markTrusted = (e: React.SyntheticEvent) => {
+    if (e.nativeEvent.isTrusted) trustedGestureAtRef.current = Date.now();
+  };
+  const submitRef = useRef<() => void>(() => {});
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const speechChannelRef = useRef(crypto.randomUUID());
+  const speechLanguageRef = useRef('en-US');
+  const speechReceivedRef = useRef(false);
+  const speechErrorRef = useRef(false);
+  const speechReadyRef = useRef(false);
+  const pendingSpeechStartRef = useRef(false);
   const pressTimerRef = useRef<NodeJS.Timeout | null>(null);
   const logTimerRef = useRef<NodeJS.Timeout | null>(null);
   const handsfreeRef = useRef(false);
@@ -32,12 +113,12 @@ export function EchoUI() {
 
   // Hands-free mode: keep the setting in a ref so speech callbacks see it live.
   useEffect(() => {
-    chrome.storage.local.get(['echo_handsfree'], (r) => { handsfreeRef.current = !!r.echo_handsfree; });
-    const onChanged = (changes: any, area: string) => {
-      if (area === 'local' && changes.echo_handsfree) handsfreeRef.current = !!changes.echo_handsfree.newValue;
-    };
-    chrome.storage.onChanged.addListener(onChanged);
-    return () => chrome.storage.onChanged.removeListener(onChanged);
+    chrome.runtime.sendMessage({ type: 'ECHO_CONTENT_PREFS' }).then((r: any) => {
+      if (!r?.success) return;
+      handsfreeRef.current = !!r.handsfree;
+      setAppearance(resolveAppearance(r.avatar));
+      speechLanguageRef.current = String(r.language || 'en-US');
+    }).catch(() => {});
   }, []);
 
   const showLog = (text: string) => {
@@ -47,6 +128,44 @@ export function EchoUI() {
       setLogText('');
     }, 4000);
   };
+
+  // Remember the last text the user selected on the page. Pressing ECHO can
+  // clear the selection, so "Explain" works from this copy instead.
+  const [selection, setSelection] = useState<{ text: string; at: number } | null>(null);
+  useEffect(() => {
+    const onSelection = () => {
+      const sel = window.getSelection();
+      const text = sel?.toString().trim() || '';
+      if (!text) return;
+      const node = sel?.anchorNode;
+      if (node && document.getElementById('echo-extension-root')?.contains(node)) return;
+      setSelection(prev => (prev?.text === text ? prev : { text: text.slice(0, 1500), at: Date.now() }));
+    };
+    document.addEventListener('selectionchange', onSelection);
+    return () => document.removeEventListener('selectionchange', onSelection);
+  }, []);
+
+  const sendSpeechControl = (command: 'start' | 'stop') => {
+    if (command === 'start' && !speechReadyRef.current) {
+      pendingSpeechStartRef.current = true;
+      return;
+    }
+    if (command === 'stop') pendingSpeechStartRef.current = false;
+    chrome.runtime.sendMessage({ type: 'ECHO_SPEECH_CONTROL', channel: speechChannelRef.current,
+      command, language: speechLanguageRef.current }).then((r: any) => {
+        if (r?.success === false) throw new Error('Speech frame is not ready. Try again.');
+      }).catch(error => {
+        showLog(`Speech unavailable: ${error?.message || 'extension error'}`);
+        setStatus('error');
+      });
+  };
+
+  useEffect(() => {
+    if (!visible) {
+      speechReadyRef.current = false;
+      pendingSpeechStartRef.current = false;
+    }
+  }, [visible]);
 
   // The passive observer posts suggestions on the page's own window. Any script
   // on the page can forge such a message, so the action is never taken from the
@@ -70,41 +189,14 @@ export function EchoUI() {
     return () => window.removeEventListener('message', onLocalSuggest);
   }, []);
 
-  const acceptSuggestion = () => {
-    if (!suggestion) return;
+  const acceptSuggestion = (e: React.MouseEvent) => {
+    if (!suggestion || !e.nativeEvent.isTrusted) return;
     setVisible(true);
     chrome.runtime.sendMessage({ type: 'USER_INPUT', text: suggestion.action });
     showLog(`You: ${suggestion.action}`);
     setStatus('thinking');
     setSuggestion(null);
   };
-
-  // Listen to iframe sandbox for speech events
-  useEffect(() => {
-    const handleSandboxMessage = (event: MessageEvent) => {
-      // Security: ensure it comes from our extension
-      if (event.origin !== `chrome-extension://${chrome.runtime.id}`) return;
-
-      if (event.data.type === 'ECHO_SPEECH_START') {
-        setStatus('listening');
-      } else if (event.data.type === 'ECHO_SPEECH_RESULT') {
-        setInputText(prev => prev + event.data.text + ' ');
-      } else if (event.data.type === 'ECHO_SPEECH_ERROR') {
-        console.error('[ECHO Speech Error]', event.data.error);
-        setStatus('error');
-        setTimeout(() => setStatus('idle'), 2000);
-      } else if (event.data.type === 'ECHO_SPEECH_END') {
-        setTimeout(() => {
-          if (submitBtnRef.current) submitBtnRef.current.click();
-        }, 100);
-      }
-    };
-
-    window.addEventListener('message', handleSandboxMessage);
-    return () => window.removeEventListener('message', handleSandboxMessage);
-  }, []);
-
-
 
   useEffect(() => {
     // Check initial state
@@ -113,13 +205,20 @@ export function EchoUI() {
     });
 
     // Load initial position
-    chrome.storage.local.get(['echo_position'], (res) => {
-      if (res.echo_position) setPosition(res.echo_position as { x: number, y: number });
-    });
+    chrome.runtime.sendMessage({ type: 'ECHO_CONTENT_PREFS' }).then((res: any) => {
+      if (res?.position) setPosition(res.position as { x: number, y: number });
+    }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'ECHO_PENDING_APPROVAL' })
+      .then((res: any) => { if (res?.approval?.id) setApprovalId(String(res.approval.id)); })
+      .catch(() => {});
 
     const handleMessage = (message: any) => {
       if (message.type === 'ECHO_GLOBAL_WAKE') {
         setVisible(message.state);
+      } else if (message.type === 'ECHO_PREFS_UPDATED') {
+        handsfreeRef.current = !!message.handsfree;
+        speechLanguageRef.current = String(message.language || 'en-US');
+        setAppearance(resolveAppearance(message.avatar));
       } else if (message.type === 'ECHO_STATE') {
         if (message.state !== 'Idle') showLog(message.state);
         // Map brain status to reactor status
@@ -132,46 +231,57 @@ export function EchoUI() {
         }
         else setStatus('thinking'); // Thinking, Acting, etc.
 
+      } else if (message.type === 'ECHO_WRITER_SHOW') {
+        setWriter(prev => (message.state !== 'loading' && prev && prev.requestId !== message.requestId) ? prev : {
+          requestId: String(message.requestId), title: String(message.title || 'ECHO Writer'), state: message.state,
+          text: message.text, error: message.error, canReplace: !!message.canReplace,
+        });
       } else if (message.type === 'ECHO_SAY') {
-        showLog(message.text);
+        // Citation markers like [1] are for reading in the side panel, not for speech.
+        const plain = String(message.text || '').replace(/\[\d+\]/g, '');
+        showLog(plain);
         setStatus('speaking');
         
         window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(message.text);
+        const utterance = new SpeechSynthesisUtterance(plain);
+        utterance.lang = speechLanguageRef.current;
         
-        // Find a natural sounding voice
-        const voices = window.speechSynthesis.getVoices();
-        const preferredVoices = [
-          'Google UK English Female',
-          'Google US English', 
-          'Samantha',
-          'Karen',
-          'Google UK English Male'
-        ];
-        
-        let selectedVoice = null;
-        for (const name of preferredVoices) {
-          selectedVoice = voices.find(v => v.name === name);
-          if (selectedVoice) break;
-        }
-        
-        if (!selectedVoice) {
-          selectedVoice = voices.find(v => v.lang.startsWith('en')) || voices[0];
-        }
-        
-        if (selectedVoice) {
-          utterance.voice = selectedVoice;
-        }
+        // A voice that matches the character: a woman's voice for a female
+        // character, a man's for a male one (see voice.ts).
+        const { voice, pitch } = pickVoice(window.speechSynthesis.getVoices(), speechLanguageRef.current, voiceGenderRef.current);
+        if (voice) utterance.voice = voice;
+        utterance.pitch = pitch;
 
         utterance.rate = 1.05;
-        
+
+        // cancel() above ends the previous utterance, and its events can land
+        // after this one starts; only the current utterance may change state.
+        utteranceRef.current = utterance;
+        const isCurrent = () => utteranceRef.current === utterance;
+        const text = plain;                 // what is actually spoken, so word positions line up
+        utterance.onstart = () => {
+          if (!isCurrent()) return;
+          setTalking(true);
+          // The avatar lip-syncs from the text itself (and laughs at any "haha" in it).
+          avatarCueRef.current?.speak(text);
+          if (FUNNY.test(text)) avatarCueRef.current?.laugh();
+        };
+        utterance.onboundary = (e: SpeechSynthesisEvent) => {
+          // Voices that report word positions keep the lip-sync exactly in step.
+          if (isCurrent() && (!e.name || e.name === 'word')) avatarCueRef.current?.word(e.charIndex);
+        };
+        utterance.onerror = () => {
+          if (isCurrent()) setTalking(false);
+        };
         utterance.onend = () => {
+          if (!isCurrent()) return;
+          setTalking(false);
           setStatus('idle');
           // Hands-free: reopen the mic after ECHO finishes speaking so the
           // user can keep the conversation going without clicking.
           if (handsfreeRef.current && visibleRef.current) {
             setTimeout(() => {
-              iframeRef.current?.contentWindow?.postMessage({ type: 'START_RECOGNITION' }, '*');
+              sendSpeechControl('start');
             }, 400);
           }
         };
@@ -184,6 +294,32 @@ export function EchoUI() {
         setVisible(true);
         setChatVisible(true);
         setTimeout(() => inputRef.current?.focus(), 120);
+      } else if (message.type === 'ECHO_APPROVAL_REQUEST') {
+        setApprovalId(String(message.id));
+        setVisible(true);
+        setStatus('idle');
+      } else if (message.type === 'ECHO_APPROVAL_CLEAR') {
+        setApprovalId(prev => prev === message.id ? null : prev);
+      } else if (message.type === 'ECHO_SPEECH_EVENT_DELIVER') {
+        if (message.event === 'start') {
+          speechReceivedRef.current = false;
+          speechErrorRef.current = false;
+          setStatus('listening');
+        } else if (message.event === 'result') {
+          speechReceivedRef.current = true;
+          setInputText(prev => prev + String(message.text || '') + ' ');
+        } else if (message.event === 'error') {
+          speechErrorRef.current = true;
+          showLog(`Speech error: ${String(message.error || 'unknown')}`);
+          setStatus('error');
+        } else if (message.event === 'end') {
+          if (speechReceivedRef.current && !speechErrorRef.current) {
+            // Speech results come only from ECHO's own frame, so no gesture check.
+            setTimeout(() => submitRef.current(), 150);
+          } else {
+            setStatus('idle');
+          }
+        }
       }
     };
     
@@ -194,16 +330,22 @@ export function EchoUI() {
   }, []);
 
   const handleSubmit = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
+    if (e) {
+      e.preventDefault();
+      if (Date.now() - trustedGestureAtRef.current > 1000) return;
+    }
     if (!inputText.trim() || status === 'thinking' || status === 'speaking') return;
     
     if (status === 'listening') {
-      iframeRef.current?.contentWindow?.postMessage({ type: 'STOP_RECOGNITION' }, '*');
+      sendSpeechControl('stop');
     }
 
     try {
       showLog(`You: ${inputText.trim()}`);
-      chrome.runtime.sendMessage({ type: 'USER_INPUT', text: inputText });
+      chrome.runtime.sendMessage({ type: 'USER_INPUT', text: inputText }).catch(err => {
+        showLog(`Could not send: ${err?.message || 'extension unavailable'}`);
+        setStatus('error');
+      });
     } catch (err) {
       console.error(err);
       setStatus('error');
@@ -216,16 +358,71 @@ export function EchoUI() {
     setStatus('thinking');
   };
 
+  submitRef.current = () => handleSubmit();
+
+  const freshSelection = selection && Date.now() - selection.at < SELECTION_TTL_MS ? selection.text : null;
+  const quickActions: QuickAction[] = [
+    { id: 'summarize', label: 'Summarize', icon: ICONS.summarize,
+      hint: 'Summarize this page (runs locally, no API)', command: () => 'summarize this page' },
+    { id: 'explain', label: 'Explain', icon: ICONS.lightbulb,
+      hint: freshSelection ? `Explain: "${freshSelection.slice(0, 80)}${freshSelection.length > 80 ? '…' : ''}"` : 'Select text on the page first',
+      command: () => freshSelection ? `Explain this selected text in simple words: "${freshSelection}"` : null },
+    { id: 'translate', label: 'Translate', icon: ICONS.translate,
+      hint: `Translate this page into ${LANGUAGE_NAMES[speechLanguageRef.current.slice(0, 2)] || 'English'}`,
+      command: () => `translate this page into ${LANGUAGE_NAMES[speechLanguageRef.current.slice(0, 2)] || 'English'}` },
+    { id: 'fill', label: 'Fill form', icon: ICONS.form,
+      hint: 'Fill the form on this page from your profile (runs locally)', command: () => 'fill this form' },
+    { id: 'watch', label: 'Watch', icon: ICONS.watch,
+      hint: 'Check this page every hour and tell me when it changes', command: () => 'watch this page' },
+    { id: 'tabs', label: 'My tabs', icon: ICONS.tabs,
+      hint: 'List the tabs you have open', command: () => 'list my open tabs' },
+  ];
+
+  const runQuickAction = (e: React.MouseEvent, action: QuickAction) => {
+    if (!e.nativeEvent.isTrusted || status === 'thinking' || status === 'speaking') return;
+    const command = action.command();
+    if (!command) return;
+    if (status === 'listening') sendSpeechControl('stop');
+    showLog(`You: ${action.label}`);
+    chrome.runtime.sendMessage({ type: 'USER_INPUT', text: command }).catch(err => {
+      showLog(`Could not send: ${err?.message || 'extension unavailable'}`);
+      setStatus('error');
+    });
+    if (action.id === 'explain') setSelection(null);
+    setChatVisible(false);
+    setStatus('thinking');
+  };
+
+  const toggleMic = (e: React.MouseEvent) => {
+    if (!e.nativeEvent.isTrusted) return;
+    if (status === 'listening') { sendSpeechControl('stop'); return; }
+    if (status === 'thinking' || status === 'speaking') return;
+    setInputText('');
+    sendSpeechControl('start');
+  };
+
+  const stopEverything = (e: React.MouseEvent) => {
+    if (!e.nativeEvent.isTrusted) return;
+    window.speechSynthesis.cancel();
+    setTalking(false);
+    chrome.runtime.sendMessage({ type: 'ECHO_ABORT' });
+    setStatus('idle');
+  };
+
   const handlePointerDown = (e: React.PointerEvent) => {
+    if (!e.nativeEvent.isTrusted) return;
     isDraggingRef.current = false;
     dragStartPosRef.current = { ...positionRef.current };
     dragStartMouseRef.current = { x: e.clientX, y: e.clientY };
+    longPressedRef.current = false;
 
+    // Long press toggles the command bar: opens it, or closes it if open.
     pressTimerRef.current = setTimeout(() => {
-      if (!isDraggingRef.current) {
-        setChatVisible(true);
-        setTimeout(() => inputRef.current?.focus(), 100);
-      }
+      if (isDraggingRef.current) return;
+      longPressedRef.current = true;
+      const opening = !chatVisibleRef.current;
+      setChatVisible(opening);
+      if (opening) setTimeout(() => inputRef.current?.focus(), 100);
     }, 500);
 
     window.addEventListener('pointermove', handlePointerMove);
@@ -244,9 +441,10 @@ export function EchoUI() {
       let newX = dragStartPosRef.current.x + dx;
       let newY = dragStartPosRef.current.y + dy;
       
-      // keep within window bounds (approx)
-      newX = Math.max(0, Math.min(newX, window.innerWidth - 100));
-      newY = Math.max(0, Math.min(newY, window.innerHeight - 100));
+      // keep within window bounds
+      const box = avatarBoxRef.current;
+      newX = Math.max(0, Math.min(newX, window.innerWidth - box.w));
+      newY = Math.max(0, Math.min(newY, window.innerHeight - box.h));
 
       setPosition({ x: newX, y: newY });
     }
@@ -261,7 +459,7 @@ export function EchoUI() {
     if (isDraggingRef.current) {
       // Save and broadcast
       const finalPos = positionRef.current;
-      chrome.storage.local.set({ echo_position: finalPos });
+      chrome.runtime.sendMessage({ type: 'ECHO_SET_POSITION', position: finalPos }).catch(() => {});
       chrome.runtime.sendMessage({ type: 'ECHO_SYNC_POSITION', position: finalPos });
       
       // Prevent click from firing right after drag by delaying a reset flag
@@ -272,25 +470,63 @@ export function EchoUI() {
   };
 
   const handleClick = (e: React.MouseEvent) => {
+    if (!e.nativeEvent.isTrusted) return;
     if (isDraggingRef.current) {
       e.stopPropagation();
       return;
     }
     
+    if (longPressedRef.current) {
+      longPressedRef.current = false;
+      return;
+    }
+    // While the bar is open a click does nothing; long press or Esc closes it.
     if (chatVisible) return;
 
     if (status === 'listening') {
-      iframeRef.current?.contentWindow?.postMessage({ type: 'STOP_RECOGNITION' }, '*');
+      sendSpeechControl('stop');
     } else if (window.speechSynthesis.speaking || status === 'thinking' || status === 'speaking' || status.startsWith('Executing')) {
       // Abort ongoing work and speech
       window.speechSynthesis.cancel();
+      setTalking(false);
       chrome.runtime.sendMessage({ type: 'ECHO_ABORT' });
       setStatus('idle');
     } else {
       setInputText('');
-      iframeRef.current?.contentWindow?.postMessage({ type: 'START_RECOGNITION' }, '*');
+      sendSpeechControl('start');
     }
   };
+
+  // ECHO Writer result card. Like the toast, it shows even when the orb sleeps.
+  const writerAction = (e: React.MouseEvent, kind: 'replace' | 'copy' | 'close') => {
+    if (!e.nativeEvent.isTrusted || !writer) return;
+    if (kind === 'close') { setWriter(null); return; }
+    if (kind === 'copy') {
+      navigator.clipboard.writeText(writer.text || '')
+        .then(() => setWriter(w => w && { ...w, note: 'Copied.' }))
+        .catch(() => setWriter(w => w && { ...w, note: 'Copy failed. Select the text and copy it.' }));
+      return;
+    }
+    const r = replaceSelection(writer.requestId, writer.text || '');
+    if (r.success) setWriter(null);
+    else setWriter(w => w && { ...w, canReplace: false, note: r.error });
+  };
+  const writerCard = writer ? (
+    <div id="echo-writer-card" role="dialog" aria-label="ECHO Writer">
+      <div className="echo-writer-head">
+        <strong>ECHO Writer · {writer.title}</strong>
+        <button className="echo-writer-x" onClick={e => writerAction(e, 'close')} aria-label="Close">{ICONS.close}</button>
+      </div>
+      {writer.state === 'loading' && <div className="echo-writer-body echo-writer-muted">Writing…</div>}
+      {writer.state === 'error' && <div className="echo-writer-body echo-writer-error">{writer.error}</div>}
+      {writer.state === 'done' && <div className="echo-writer-body">{writer.text}</div>}
+      {writer.note && <div className="echo-writer-note">{writer.note}</div>}
+      {writer.state === 'done' && <div className="echo-writer-actions">
+        <button onClick={e => writerAction(e, 'copy')}>Copy</button>
+        {writer.canReplace && <button className="primary" onClick={e => writerAction(e, 'replace')}>Replace</button>}
+      </div>}
+    </div>
+  ) : null;
 
   // The proactive toast is independent of the orb — it can appear while ECHO
   // is asleep, which is exactly when a passive suggestion is most useful.
@@ -298,28 +534,46 @@ export function EchoUI() {
     <div id="echo-suggest-toast">
       <span className="echo-suggest-text">{suggestion.text}</span>
       <button className="echo-suggest-yes" onClick={acceptSuggestion}>Yes</button>
-      <button className="echo-suggest-no" onClick={() => setSuggestion(null)} aria-label="Dismiss">✕</button>
+      <button className="echo-suggest-no" onClick={() => setSuggestion(null)} aria-label="Dismiss">{ICONS.close}</button>
     </div>
   ) : null;
 
-  if (!visible) return suggestionToast;
+  // Everything ECHO draws on the page shares the glass tokens, coloured by the
+  // current character. `display: contents` keeps this wrapper out of layout.
+  const theme = { display: 'contents', ...themeVars(themeFor(appearance)) } as React.CSSProperties;
+  if (!visible) return <div className="echo-theme" style={theme}>{suggestionToast}{writerCard}</div>;
+
+  // A position saved for the smaller orb could push the character off-screen.
+  const box = boxFor(appearance);
+  const wrapperLeft = Math.max(0, Math.min(position.x, window.innerWidth - box.w));
+  const wrapperTop = Math.max(0, Math.min(position.y, window.innerHeight - box.h));
 
   return (
-    <>
+    <div className="echo-theme" style={theme}>
     {suggestionToast}
+    {writerCard}
     <div
       id="echo-root-wrapper"
+      className={character ? 'avatar-mode' : undefined}
       data-status={status}
       style={{
         position: 'absolute',
-        left: position.x,
-        top: position.y,
+        left: wrapperLeft,
+        top: wrapperTop,
+        ...(character ? { width: box.w, height: box.h } : {}),
         pointerEvents: 'auto'
       }}
     >
       <iframe 
         ref={iframeRef}
-        src={typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL ? chrome.runtime.getURL('speech.html') : ''} 
+        src={typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL ? chrome.runtime.getURL(`speech.html?channel=${speechChannelRef.current}`) : ''}
+        onLoad={() => {
+          speechReadyRef.current = true;
+          if (pendingSpeechStartRef.current) {
+            pendingSpeechStartRef.current = false;
+            sendSpeechControl('start');
+          }
+        }}
         style={{ display: 'none' }}
         allow="microphone"
         title="ECHO Speech Sandbox"
@@ -329,22 +583,38 @@ export function EchoUI() {
         {logText}
       </div>
 
-      <div id="echo-chat-box" className={chatVisible ? 'visible' : ''}>
-        <form onSubmit={handleSubmit} style={{ display: 'flex', width: '100%', gap: '8px' }}>
-          <input 
-            id="input" 
-            ref={inputRef}
-            type="text" 
-            placeholder="Type a command…" 
-            autoComplete="off" 
-            spellCheck="false"
-            value={inputText}
-            onChange={e => setInputText(e.target.value)}
-          />
-          <button ref={submitBtnRef} id="echo-send-btn" type="submit" title="Send" disabled={!inputText.trim()}>➤</button>
-        </form>
-      </div>
 
+      <CommandBar
+        visible={chatVisible}
+        status={status}
+        placement={{
+          below: wrapperTop < COMMAND_BAR_H + 16,
+          alignLeft: wrapperLeft + box.w < COMMAND_BAR_W + 8,
+        }}
+        inputText={inputText}
+        setInputText={setInputText}
+        inputRef={inputRef}
+        submitBtnRef={submitBtnRef}
+        onSubmit={handleSubmit}
+        markTrusted={markTrusted}
+        actions={quickActions}
+        onAction={runQuickAction}
+        onMic={toggleMic}
+        onStop={stopEverything}
+        onClose={() => setChatVisible(false)}
+      />
+
+      {character ? (
+        <EchoAvatar
+          key={character.id}
+          character={character}
+          status={status}
+          talking={talking}
+          cueRef={avatarCueRef}
+          onClick={handleClick}
+          onPointerDown={handlePointerDown}
+        />
+      ) : (
       <div 
         id="orb" 
         className="reactor" 
@@ -369,13 +639,23 @@ export function EchoUI() {
 
         <div 
           className="core-hitbox circle abs-center"
-          title="Click to talk, long-press to type, drag to move"
+          title="Click to talk · long-press for commands · drag to move"
           onClick={handleClick}
           onPointerDown={handlePointerDown}
           style={{ width: '45%', height: '45%', zIndex: 10, cursor: 'pointer', touchAction: 'none' }}
         ></div>
       </div>
+      )}
     </div>
-    </>
+    {/* Drawn last and pinned to the corner so nothing of ECHO's covers it; the
+        frame only arms "Allow" while it is fully visible. */}
+    {approvalId && <div id="echo-approval-box">
+      <iframe
+        key={approvalId}
+        src={chrome.runtime.getURL(`approval.html?id=${encodeURIComponent(approvalId)}`)}
+        title="ECHO action approval"
+      />
+    </div>}
+    </div>
   );
 }

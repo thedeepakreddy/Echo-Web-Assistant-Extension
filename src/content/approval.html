@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>ECHO Approval</title>
+</head>
+<body class="echo-theme">
+    <div id="box" role="alertdialog" aria-labelledby="title" aria-describedby="detail">
+        <div class="head">
+            <span class="badge" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z" /><path d="M12 8v4.5M12 16h.01" />
+                </svg>
+            </span>
+            <span class="titles">
+                <span class="label">ECHO · Approval</span>
+                <strong id="title">Allow this action?</strong>
+            </span>
+        </div>
+        <span id="detail">Loading…</span>
+        <div class="arming" aria-hidden="true"><i></i></div>
+        <div class="foot">
+            <span id="hint" aria-live="polite"></span>
+            <button id="deny" type="button">Deny</button>
+            <button id="allow" type="button" disabled>Allow once</button>
+        </div>
+    </div>
+    <script src="approval.js"></script>
+</body>
+</html>

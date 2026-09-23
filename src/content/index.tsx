@@ -4,9 +4,29 @@ import { handleDomAction } from './actions';
 import { EchoUI } from './ui';
 import { initHighlighter, renderHighlights } from './highlighter';
 import { initPassiveObserver } from './passive-observer';
+import { startRecording } from './recorder';
+import { videoTranscriptAction } from './video-transcript';
+import { captureSelection } from './writer';
 
 // 1. DOM actions requested by the background (model tools AND the local stack).
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'ECHO_PING') {
+    sendResponse({ success: true });
+    return false;
+  }
+  // ECHO Writer: remember the selection the user right-clicked.
+  if (message.type === 'ECHO_WRITER_CAPTURE') {
+    try { sendResponse(captureSelection(String(message.requestId || ''))); }
+    catch (e: any) { sendResponse({ success: false, error: e.message }); }
+    return false;
+  }
+  // Transcripts need network and waiting, so this action answers asynchronously.
+  if (message.type === 'DOM_ACTION' && message.action === 'get_video_transcript') {
+    videoTranscriptAction(message.args)
+      .then(sendResponse)
+      .catch((e: any) => sendResponse({ success: false, error: e?.message || 'Transcript failed' }));
+    return true;
+  }
   if (message.type === 'DOM_ACTION') {
     try {
       const result = handleDomAction(message.action, message.args);
@@ -55,10 +75,9 @@ const initUI = () => {
 
 // 3. Local-first features that run without any user action.
 const initLocalFeatures = () => {
-  chrome.storage.local.get(['echo_local_settings'], (r) => {
-    const s = (r.echo_local_settings || {}) as any;
-    const autoIndex = s.autoIndex !== false;
-    const passive = s.passiveSuggest !== false;
+  chrome.runtime.sendMessage({ type: 'ECHO_CONTENT_PREFS' }).then((s: any) => {
+    const autoIndex = s?.success && s.autoIndex === true && s.siteAllowed === true;
+    const passive = s?.success && s.passiveSuggest !== false;
 
     // Highlight capture is always on — it is purely local and user-initiated.
     initHighlighter();
@@ -73,7 +92,10 @@ const initLocalFeatures = () => {
         if (res?.texts?.length) renderHighlights(res.texts);
       })
       .catch(() => { /* background asleep — nothing to restore */ });
-  });
+  }).catch(() => { initHighlighter(); });
+  chrome.runtime.sendMessage({ type: 'ECHO_RECORD_STATUS' })
+    .then((r: any) => { if (r?.active) startRecording(); })
+    .catch(() => {});
 };
 
 /** Hand the readable text of this page to the background knowledge base. */

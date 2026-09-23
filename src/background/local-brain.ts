@@ -9,7 +9,7 @@ import { executeTool } from './tools';
 import { matchSite, siteSearchUrl, siteActionSelectors, SITE_PROFILES } from './site-knowledge';
 import {
   startRecording, stopRecording, cancelRecording, isRecording,
-  listWorkflows, deleteWorkflow, playWorkflow, findWorkflowKey,
+  listWorkflows, deleteWorkflow, playWorkflow, findWorkflowKey, previewWorkflow, isSafeWorkflowUrl,
 } from './workflow-engine';
 import {
   createWatcher, listWatchers, deleteWatcher, clearWatchers, describeWatcher, WatchCondition,
@@ -17,6 +17,9 @@ import {
 import { searchKB, recentPages, pagesToday, kbSize } from './knowledge-base';
 import { allHighlights, highlightsForUrl, exportHighlightsMarkdown, searchHighlights } from './highlights';
 import { cacheStats, cacheClear } from './response-cache';
+import { abortCurrentWork, clearCloudConversation } from './brain';
+import { cancelTask } from './safety';
+import { searchAvailable } from './web-search';
 
 export interface LocalResult {
   handled: true;
@@ -107,7 +110,7 @@ rule(/^(?:help|what can you do|what do you do|show me (?:your )?(?:features|capa
 
 // --- abort ---
 rule(/^(stop|cancel|abort|nevermind|never mind|quit|halt)\b[\s!.]*$/i,
-  async () => "Stopped.");
+  async () => { abortCurrentWork(); cancelTask(); return "Stopped."; });
 
 // --- memory ---
 rule(/\b(remember|note|save|store)\b.{0,20}?\b(that\s+)?my\s+([\w\s]{2,30}?)\s+(?:is|are|=)\s+(.+)$/i,
@@ -149,6 +152,8 @@ rule(/\b(forget|delete|remove)\b.{0,15}\bmy\s+([\w\s]{2,30}?)\s*$/i,
     if (!key) return `I don't have your ${m[2].trim()} saved.`;
     delete mem[key];
     await store.set({ echo_memory: mem });
+    await cacheClear();
+    clearCloudConversation();
     return `Forgotten — I no longer have your ${m[2].trim()}.`;
   });
 
@@ -167,14 +172,15 @@ rule(/\b(list|show|what)\b.{0,12}\b(my )?(saved )?tasks?\b/i,
 rule(/\b(record|capture|watch me|learn)\b.{0,20}\b(a )?(workflow|macro|steps|what i do|sequence)\b/i,
   async (_m, ctx) => {
     if (ctx.tabId == null) return "I need an active tab to record on.";
-    if (isRecording()) return "I'm already recording. Say \"stop recording and call it <name>\" when you're done.";
+    if (await isRecording()) return "I'm already recording. Say \"stop recording and call it <name>\" when you're done.";
+    if (!isSafeWorkflowUrl(ctx.url)) return "I can't record a workflow on a sign-in or token-bearing URL.";
     await startRecording(ctx.tabId, ctx.url);
     return "Recording. Do your steps normally — I'm watching clicks and typing (never passwords). Say \"stop recording and call it <name>\" when you're finished.";
   });
 
 rule(/\b(stop|finish|end|done)\b.{0,25}\brecording\b(?:.{0,25}?\b(?:call(?:ed)? it|name it|as)\s+["']?([\w\s-]{1,40}?)["']?)?\s*$/i,
   async (m) => {
-    if (!isRecording()) return "I'm not recording right now.";
+    if (!await isRecording()) return "I'm not recording right now.";
     const name = (m[2] || `workflow ${Object.keys(await listWorkflows()).length + 1}`).trim();
     const res = await stopRecording(name);
     return res.message;
@@ -182,7 +188,7 @@ rule(/\b(stop|finish|end|done)\b.{0,25}\brecording\b(?:.{0,25}?\b(?:call(?:ed)? 
 
 rule(/\b(cancel|discard|throw away)\b.{0,15}\brecording\b/i,
   async () => {
-    if (!isRecording()) return "I'm not recording right now.";
+    if (!await isRecording()) return "I'm not recording right now.";
     await cancelRecording();
     return "Recording cancelled — nothing saved.";
   });
@@ -195,6 +201,9 @@ rule(/\b(list|show|what)\b.{0,15}\b(my )?(workflows?|macros?)\b/i,
       ? `Saved workflows:\n${list.map(w => `• ${w.name} — ${w.steps.length} steps${w.runs ? `, run ${w.runs}×` : ''}`).join('\n')}`
       : `No workflows yet. Say "record a workflow" and I'll learn one by watching you.`;
   });
+
+rule(/^preview\s+(?:my\s+|the\s+)?(?:workflow\s+)?["']?([\w\s-]{2,40}?)["']?\s*$/i,
+  async (m) => previewWorkflow(m[1].trim()));
 
 rule(/\b(run|play|replay|execute|do)\b\s+(?:my\s+|the\s+)?(?:workflow\s+)?["']?([\w\s-]{2,40}?)["']?\s*(?:workflow)?\s*$/i,
   async (m, ctx) => {
@@ -391,7 +400,12 @@ rule(/^(?:search|look up|find|google)\s+(?:for\s+)?(.+?)\s+(?:on|in|at)\s+([\w.]
 rule(/^(?:search|look up|find)\s+([\w.]{2,30})\s+for\s+(.+?)\s*$/i,
   async (m, ctx) => siteSearch(m[1], m[2], ctx));
 rule(/^(?:google|search(?: the web)?(?: for)?)\s+(.{2,120}?)\s*$/i,
-  async (m, ctx) => siteSearch('google', m[1], ctx));
+  async (m, ctx) => {
+    // "search the web / online for X" gets a cited answer when Claude or Gemini
+    // can search; "google X" still opens Google.
+    if (/^search (the web|online)\b/i.test(ctx.input) && await searchAvailable()) return null;
+    return siteSearch('google', m[1], ctx);
+  });
 
 async function siteSearch(siteName: string, query: string, ctx: Ctx): Promise<string | null> {
   const q = query.trim();

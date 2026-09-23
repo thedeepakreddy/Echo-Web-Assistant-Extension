@@ -1,3 +1,7 @@
+import { requestApproval, logAction, safeNavigationUrl, currentTaskEpoch, sensitiveAction } from './safety';
+import { cacheClear } from './response-cache';
+import { agentScope, assertInScope, assertIsolatedUrl } from './isolation';
+
 // Poll until a tab's status is 'complete' or the timeout fires.
 // Resolves early on chrome.runtime.lastError so callers never hang.
 function waitForTabLoad(tabId: number, timeout = 9000): Promise<void> {
@@ -19,7 +23,7 @@ function waitForTabLoad(tabId: number, timeout = 9000): Promise<void> {
 const DOM_ACTIONS = new Set([
   'read_screen', 'click_element', 'type_text', 'press_key',
   'scroll', 'find_on_page', 'get_page_text', 'extract_table',
-  'go_back', 'go_forward',
+  'go_back', 'go_forward', 'get_video_transcript',
   // local-stack actions
   'extract_pattern', 'fill_form', 'click_selector', 'read_value',
   'record_start', 'record_stop', 'play_step',
@@ -27,22 +31,79 @@ const DOM_ACTIONS = new Set([
 ]);
 
 export async function executeTool(toolName: string, args: any, tabId?: number): Promise<any> {
+  const epoch = currentTaskEpoch();
+  // Isolated browsing: every tab-touching tool stays inside the private window.
+  const scope = agentScope();
+  if (scope && (DOM_ACTIONS.has(toolName) || ['navigate', 'screenshot'].includes(toolName))) {
+    await assertInScope(tabId);
+  }
   if (DOM_ACTIONS.has(toolName)) {
     if (!tabId) throw new Error('No active tab to execute action');
-    return new Promise((resolve, reject) => {
-      chrome.tabs.sendMessage(tabId, { type: 'DOM_ACTION', action: toolName, args }, (response) => {
+    // Actions that change the page. They are all logged; only paying and
+    // sending a mail or message wait for the user's approval.
+    const guarded = ['click_element', 'click_selector', 'type_text', 'fill_form'].includes(toolName)
+      || (toolName === 'press_key' && String(args?.key) === 'Enter');
+    let detail = toolName.replace(/_/g, ' ');
+    let approvalDetail = detail;
+    let expectedLabel: string | undefined;
+    if (guarded) {
+      if (['click_element', 'click_selector', 'type_text'].includes(toolName)) {
+        const inspection: any = await chrome.tabs.sendMessage(tabId, {
+          type: 'DOM_ACTION', action: 'inspect_action', args: { action: toolName, ...args },
+        });
+        if (!inspection?.success) throw new Error('Could not inspect the target action.');
+        if (toolName === 'type_text' && inspection.result?.sensitive) {
+          throw new Error('ECHO will not type into password, payment, or verification fields.');
+        }
+        expectedLabel = inspection.result?.label;
+        detail = `${detail}${toolName === 'type_text' && args?.submit ? ' and submit' : ''}: ${inspection.result?.label || 'page element'}`;
+        approvalDetail = toolName === 'type_text'
+          ? `${detail}. ${String(args?.text ?? '').length} characters (text hidden from this web page)`
+          : detail;
+      } else if (toolName === 'fill_form') {
+        detail = 'fill form from saved data';
+        approvalDetail = detail;
+      }
+      const pageUrl = (await chrome.tabs.get(tabId).catch(() => null))?.url || '';
+      const kind = sensitiveAction({ tool: toolName, label: expectedLabel, url: pageUrl,
+        key: String(args?.key ?? ''), submit: args?.submit === true });
+      if (kind) {
+        const prefix = kind === 'payment' ? 'Payment' : 'Send';
+        const approved = await requestApproval(toolName, `${prefix}: ${approvalDetail}`, tabId);
+        if (!approved) {
+          await logAction(toolName, detail, 'denied');
+          throw new Error('Action denied or approval timed out.');
+        }
+        if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before the action.');
+        await logAction(toolName, detail, 'approved');
+      }
+    }
+    try {
+      const result = await new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tabId, { type: 'DOM_ACTION', action: toolName, args: { ...args, expectedLabel } }, (response) => {
         if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
         else if (!response || !response.success) reject(new Error(response?.error || 'Action failed'));
         else resolve(response.result);
       });
-    });
+      });
+      if (guarded) await logAction(toolName, detail, 'done');
+      return result;
+    } catch (error) {
+      if (guarded) await logAction(toolName, detail, 'failed');
+      throw error;
+    }
   }
 
   switch (toolName) {
     case 'screenshot': {
-      // Capture the visible tab
+      if (!tabId) throw new Error('No tab to capture.');
+      const target = await chrome.tabs.get(tabId);
+      if (!target.active || target.windowId == null) throw new Error('Switch to the requested tab before capturing a screenshot.');
+      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before screenshot.');
+      await logAction('screenshot', 'current tab image', 'done');
+      // captureVisibleTab captures the active tab in this exact window.
       return new Promise((resolve, reject) => {
-        chrome.tabs.captureVisibleTab({ format: 'png' }, (dataUrl) => {
+        chrome.tabs.captureVisibleTab(target.windowId, { format: 'png' }, (dataUrl) => {
           if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
           else resolve({ dataUrl });
         });
@@ -50,11 +111,15 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
     }
 
     case 'open_url': {
+      const url = safeNavigationUrl(args.url);
+      assertIsolatedUrl(url);
+      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before navigation.');
+      await logAction('open_url', new URL(url).origin, 'done');
       // Create the tab, wait for it to fully load, then return the NEW tab's id.
       // The brain loops watch for `newTabId` in the result and update their
       // activeTabId so all subsequent DOM actions go to the right tab.
       const newTab = await new Promise<chrome.tabs.Tab>((resolve, reject) => {
-        chrome.tabs.create({ url: args.url }, (tab) => {
+        chrome.tabs.create(scope ? { url, windowId: scope.windowId } : { url }, (tab) => {
           if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
           else resolve(tab);
         });
@@ -65,8 +130,12 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
 
     case 'navigate': {
       if (!tabId) throw new Error('No active tab to navigate');
+      const url = safeNavigationUrl(args.url);
+      assertIsolatedUrl(url);
+      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before navigation.');
+      await logAction('navigate', new URL(url).origin, 'done');
       await new Promise<void>((resolve, reject) => {
-        chrome.tabs.update(tabId, { url: args.url }, () => {
+        chrome.tabs.update(tabId, { url }, () => {
           if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
           else resolve();
         });
@@ -78,7 +147,7 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
 
     case 'list_tabs': {
       return new Promise((resolve, reject) => {
-        chrome.tabs.query({}, (tabs) => {
+        chrome.tabs.query(scope ? { windowId: scope.windowId } : {}, (tabs) => {
           if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
           const list = tabs.slice(0, 30).map(t => ({
             id: t.id,
@@ -92,6 +161,7 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
     }
 
     case 'switch_tab': {
+      await assertInScope(Number(args.tabId));
       return new Promise((resolve, reject) => {
         chrome.tabs.update(Number(args.tabId), { active: true }, (tab) => {
           if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
@@ -102,8 +172,13 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
     }
 
     case 'close_tab': {
+      const targetTabId = Number(args.tabId);
+      if (!Number.isInteger(targetTabId) || targetTabId <= 0) throw new Error('Invalid tab ID.');
+      await assertInScope(targetTabId);
+      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before closing the tab.');
+      await logAction('close_tab', `tab ${targetTabId}`, 'done');
       return new Promise((resolve, reject) => {
-        chrome.tabs.remove(Number(args.tabId), () => {
+        chrome.tabs.remove(targetTabId, () => {
           if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
           else resolve({ success: true, message: `Closed tab ${args.tabId}` });
         });
@@ -113,6 +188,10 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
     case 'download_data': {
       const content = String(args.content ?? '');
       const filename = String(args.filename || 'echo-download.txt');
+      if (!/^[^/\\\x00-\x1f]{1,120}$/.test(filename) || filename === '.' || filename === '..')
+        throw new Error('Invalid download filename.');
+      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before download.');
+      await logAction('download_data', filename, 'done');
       const mime = filename.endsWith('.json') ? 'application/json'
         : filename.endsWith('.csv') ? 'text/csv' : 'text/plain';
       const dataUrl = `data:${mime};charset=utf-8,${encodeURIComponent(content)}`;
@@ -207,7 +286,10 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
         chrome.storage.local.get(['echo_memory'], (result) => {
           const memory: Record<string, string> = (result.echo_memory || {}) as Record<string, string>;
           delete memory[args.key];
-          chrome.storage.local.set({ echo_memory: memory }, () => {
+          chrome.storage.local.set({ echo_memory: memory }, async () => {
+            await cacheClear();
+            const { forgetCloudConversationAfterReply } = await import('./brain');
+            forgetCloudConversationAfterReply();
             resolve({ success: true, message: `Deleted '${args.key}' from memory.` });
           });
         });

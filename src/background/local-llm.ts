@@ -17,27 +17,43 @@ export type LocalEngine = 'chrome-ai' | 'extractive' | 'none';
 
 let summarizerSession: any = null;
 let promptSession: any = null;
-let chromeAiChecked = false;
-let chromeAiUsable = false;
 
-/** Is Chrome's built-in model present and ready (or downloadable)? */
-export async function chromeAiAvailable(): Promise<boolean> {
-  if (chromeAiChecked) return chromeAiUsable;
-  chromeAiChecked = true;
-  chromeAiUsable = false;
+// Time limits. Chrome's model can stall (a download it is waiting on, a busy
+// GPU), and a stalled call must never hold a request hostage: past these, the
+// next brain answers instead.
+export const AI_CHECK_MS = 1500;
+export const AI_CREATE_MS = 5000;
+export const AI_RUN_MS = 15000;
+
+/** Reject with a timeout error if `p` has not settled within `ms`. */
+export function withTimeout<T>(p: Promise<T>, ms: number, what = 'on-device model'): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took longer than ${Math.round(ms / 1000)}s`)), ms);
+  });
+  return Promise.race([p, limit]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Is this API's model on the device and ready now? 'downloadable' and
+ * 'downloading' count as no: creating a session then waits for a
+ * multi-gigabyte download, which stalled requests until Chrome shut the
+ * background worker down mid-task.
+ */
+async function ready(api: any): Promise<boolean> {
   try {
-    if (typeof Summarizer !== 'undefined' && Summarizer?.availability) {
-      const a = await Summarizer.availability();
-      if (a === 'available' || a === 'downloadable' || a === 'downloading') chromeAiUsable = true;
-    }
-    if (!chromeAiUsable && typeof LanguageModel !== 'undefined' && LanguageModel?.availability) {
-      const a = await LanguageModel.availability();
-      if (a === 'available' || a === 'downloadable' || a === 'downloading') chromeAiUsable = true;
-    }
+    if (!api?.availability) return false;
+    return (await withTimeout(Promise.resolve(api.availability()), AI_CHECK_MS)) === 'available';
   } catch {
-    chromeAiUsable = false;
+    return false;
   }
-  return chromeAiUsable;
+}
+
+/** Is Chrome's built-in model on this device and ready to use right now? */
+export async function chromeAiAvailable(): Promise<boolean> {
+  const summarizer = typeof Summarizer !== 'undefined' ? Summarizer : null;
+  const model = typeof LanguageModel !== 'undefined' ? LanguageModel : null;
+  return (await ready(summarizer)) || (await ready(model));
 }
 
 /** Which engine will actually serve a request right now. */
@@ -49,13 +65,12 @@ async function getSummarizer(): Promise<any | null> {
   if (summarizerSession) return summarizerSession;
   try {
     if (typeof Summarizer === 'undefined' || !Summarizer?.create) return null;
-    const a = await Summarizer.availability();
-    if (a === 'unavailable') return null;
-    summarizerSession = await Summarizer.create({
+    if (!await ready(Summarizer)) return null;
+    summarizerSession = await withTimeout(Promise.resolve(Summarizer.create({
       type: 'key-points',
       format: 'plain-text',
-      length: 'short',
-    });
+      length: 'medium',
+    })), AI_CREATE_MS);
     return summarizerSession;
   } catch {
     summarizerSession = null;
@@ -67,14 +82,13 @@ async function getPromptSession(): Promise<any | null> {
   if (promptSession) return promptSession;
   try {
     if (typeof LanguageModel === 'undefined' || !LanguageModel?.create) return null;
-    const a = await LanguageModel.availability();
-    if (a === 'unavailable') return null;
-    promptSession = await LanguageModel.create({
+    if (!await ready(LanguageModel)) return null;
+    promptSession = await withTimeout(Promise.resolve(LanguageModel.create({
       initialPrompts: [{
         role: 'system',
         content: 'You are ECHO, a concise browser assistant. Answer in 1-3 short sentences using only the provided page text. If the text does not contain the answer, say so plainly.',
       }],
-    });
+    })), AI_CREATE_MS);
     return promptSession;
   } catch {
     promptSession = null;
@@ -88,12 +102,31 @@ export function resetLocalLlm() {
   try { promptSession?.destroy?.(); } catch { /* ignore */ }
   summarizerSession = null;
   promptSession = null;
-  chromeAiChecked = false;
 }
 
 export interface LocalAnswer { text: string; engine: LocalEngine }
 
 const MAX_INPUT = 12_000;
+
+/**
+ * Summarise with Chrome's built-in model only. Null when the model isn't
+ * ready, errors, or runs past the time limit — the caller moves on.
+ */
+export async function chromeAiSummarize(text: string, title?: string): Promise<string | null> {
+  const clipped = (text || '').replace(/\s+/g, ' ').trim().slice(0, MAX_INPUT);
+  if (clipped.length < 200) return null;
+  const s = await getSummarizer();
+  if (!s) return null;
+  try {
+    const out = String(await withTimeout(Promise.resolve(s.summarize(clipped, {
+      context: title ? `The page is titled "${title}".` : undefined,
+    })), AI_RUN_MS) || '').trim();
+    return out.length > 30 ? out : null;
+  } catch {
+    resetLocalLlm();   // session died or stalled; rebuild next time
+    return null;
+  }
+}
 
 /** Summarise page text on-device. Never rejects — worst case is extractive. */
 export async function localSummarize(text: string, title?: string): Promise<LocalAnswer> {
@@ -101,22 +134,9 @@ export async function localSummarize(text: string, title?: string): Promise<Loca
   if (body.length < 200) {
     return { text: body || 'There is not enough readable text on this page to summarise.', engine: 'extractive' };
   }
-  const clipped = body.slice(0, MAX_INPUT);
-
-  const s = await getSummarizer();
-  if (s) {
-    try {
-      const out = await s.summarize(clipped, {
-        context: title ? `The page is titled "${title}".` : undefined,
-      });
-      if (out && String(out).trim().length > 30) {
-        return { text: String(out).trim(), engine: 'chrome-ai' };
-      }
-    } catch {
-      resetLocalLlm(); // session died; fall through to extractive
-    }
-  }
-  return { text: extractiveSummary(clipped, title), engine: 'extractive' };
+  const ai = await chromeAiSummarize(body, title);
+  if (ai) return { text: ai, engine: 'chrome-ai' };
+  return { text: extractiveSummary(body.slice(0, MAX_INPUT), title), engine: 'extractive' };
 }
 
 /** Answer a question strictly from supplied page text, on-device. */
@@ -128,9 +148,9 @@ export async function localAsk(question: string, context: string, title?: string
   const p = await getPromptSession();
   if (p) {
     try {
-      const out = await p.prompt(
+      const out = await withTimeout(Promise.resolve(p.prompt(
         `Page${title ? ` "${title}"` : ''} content:\n"""\n${clipped}\n"""\n\nQuestion: ${question}`
-      );
+      )), AI_RUN_MS);
       const t = String(out || '').trim();
       if (t.length > 2) return { text: t, engine: 'chrome-ai' };
     } catch {
@@ -145,6 +165,29 @@ export async function localAsk(question: string, context: string, title?: string
     text: `From the page:\n\n${passages.map(s => `• ${s}`).join('\n')}`,
     engine: 'extractive',
   };
+}
+
+/**
+ * ECHO Writer fallback when no cloud provider works: Chrome's on-device model.
+ * A fresh session per call so editing instructions never mix with page Q&A.
+ * Returns null when Chrome's built-in AI is unavailable.
+ */
+export async function localWrite(instruction: string, text: string): Promise<string | null> {
+  if (typeof LanguageModel === 'undefined' || !LanguageModel?.create) return null;
+  let session: any = null;
+  try {
+    if (!await ready(LanguageModel)) return null;
+    session = await withTimeout(Promise.resolve(LanguageModel.create({
+      initialPrompts: [{ role: 'system', content: 'You edit text. Return only the resulting text, with no preamble.' }],
+    })), AI_CREATE_MS);
+    const out = String(await withTimeout(Promise.resolve(
+      session.prompt(`Task: ${instruction}\n\nText:\n"""\n${text.slice(0, MAX_INPUT)}\n"""`)), AI_RUN_MS) || '').trim();
+    return out || null;
+  } catch {
+    return null;
+  } finally {
+    try { session?.destroy?.(); } catch { /* ignore */ }
+  }
 }
 
 // ---------------------------------------------------------------------------

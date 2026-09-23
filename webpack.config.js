@@ -3,14 +3,15 @@ const CopyPlugin = require('copy-webpack-plugin');
 const webpack = require('webpack');
 
 module.exports = {
-  mode: 'development',
+  mode: 'production',
   devtool: false,
   entry: {
     background: './src/background/index.ts',
     content: './src/content/index.tsx',
     options: './src/popup/options.tsx',
     sidepanel: './src/popup/sidepanel.tsx',
-    speech: './src/content/speech.ts'
+    speech: './src/content/speech.ts',
+    approval: './src/content/approval.ts'
   },
   module: {
     rules: [
@@ -52,6 +53,7 @@ module.exports = {
     runtimeChunk: false,
   },
   output: {
+    clean: true,
     filename: '[name].js',
     chunkFilename: 'async.[contenthash:8].js',
     path: path.resolve(__dirname, 'dist'),
@@ -62,7 +64,9 @@ module.exports = {
         { from: 'manifest.json', to: '.' },
         { from: 'src/popup/options.html', to: '.' },
         { from: 'src/popup/sidepanel.html', to: '.' },
-        { from: 'src/content/speech.html', to: '.' }
+        { from: 'src/content/speech.html', to: '.' },
+        { from: 'src/content/approval.html', to: '.' },
+        { from: '*/*.webp', context: 'src/assets/characters', to: 'characters/' }
       ],
     }),
     new webpack.NormalModuleReplacementPlugin(/^node:/, (resource) => {
