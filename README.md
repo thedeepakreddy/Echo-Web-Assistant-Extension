@@ -1,346 +1,648 @@
-# ECHO Web - Local-First Autonomous Browser Agent
+# ECHO Online
 
-> A Chrome extension that drives your browser for you, built around a four-tier routing engine that answers roughly 85% of requests on-device and only spends LLM tokens on work that genuinely needs a model.
+### A local-first AI browser assistant that can understand pages, operate websites, remember useful information, and automate repeatable work—by text or voice.
 
----
+[![Version](https://img.shields.io/badge/version-2.0.0-b8a1ff)](manifest.json)
+[![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?logo=googlechrome&logoColor=white)](manifest.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
+[![Tests](https://img.shields.io/badge/tests-40%20passing-34C759)](tests/extension.test.cjs)
+[![License](https://img.shields.io/badge/license-ISC-lightgrey)](package.json)
 
-## The Problem
+ECHO lives inside Chrome as an animated assistant, a persistent side-panel chat, and a complete settings dashboard. It can summarize and explain pages, navigate and click, fill safe form fields, extract structured information, manage tabs, record workflows, monitor pages, search the web, work with video transcripts, and help rewrite selected text.
 
-Every "AI browser agent" I tried had the same failure mode: it treated a large language model as the answer to every question. Say "hi" and it burns 500 tokens. Ask it to summarise a page and it re-uploads the entire DOM plus a 25-tool schema on every single reasoning step. On a free API tier that means you get two or three real tasks before you hit a rate limit and the product becomes useless.
+The unusual part is what happens behind the interface: ECHO tries fast local methods before contacting a cloud model. Simple requests stay quick and private, cached answers are reused, supported Chrome installations can use on-device AI, and cloud models are reserved for work that genuinely needs them.
 
-I hit exactly this wall with the first version of ECHO. Two tasks and Groq's tokens-per-minute limit killed it. The instinctive fix is to shrink the prompt, and I did that, but it only bought maybe 20%. The actual problem was architectural: **the model was being asked questions it had no business answering.**
-
-"What's my email address?" is a dictionary lookup. "Open YouTube" is a URL. "Extract every email on this page" is a regular expression. "Do the same seven clicks I did yesterday" is a replay. None of those need a neural network, and paying for one is both slower and less reliable than doing the work directly.
-
-So I rebuilt ECHO around a router. Every request enters a four-tier ladder and exits at the cheapest tier that can genuinely answer it. The cloud model became the last resort instead of the front door. Measured across normal use, about 85% of requests now never touch the network, and the same free-tier quota lasts five to seven times longer.
-
-The hard part was not the tiers. It was making each tier **honestly decline**. A local tier that guesses is worse than no local tier at all, because a confidently wrong instant answer is more damaging than a slow correct one. Most of the engineering below is about that.
+> [Download the ready-to-install ECHO V2 ZIP](package%20for%20sharing/Echo_Web_Assistant_v2.zip) · [Build from source](#build-from-source) · [See everything ECHO can do](#complete-feature-guide)
 
 ---
 
-## Ten-Second Recruiter Summary
+## See ECHO in motion
 
-* **What is it?** A Manifest V3 Chrome extension that reads, navigates and acts on web pages on your behalf, using voice or text.
-* **The core idea:** A four-tier request router (deterministic logic, response cache, on-device model, cloud LLM). Each tier is allowed to decline, and every reply is tagged in the UI with the tier that produced it, so the cost of every answer is visible rather than hidden.
-* **Why it matters:** Cut LLM token consumption per task by roughly 5-7x, taking the app from unusable on a free tier to comfortably usable all day. The extension remains substantially functional with no API key configured at all.
-* **Tech:** TypeScript (strict), React 19, webpack, Chrome Extension MV3 (service worker, side panel, alarms, offscreen messaging), IndexedDB, Web Speech API, and a provider-agnostic LLM layer supporting Anthropic Claude, Google Gemini, Groq, Together AI and OpenRouter.
-* **Scale:** 26 TypeScript modules, ~5,600 lines, zero runtime dependencies beyond React and the two vendor AI SDKs. No UI framework, no state library, no lodash.
+[![ECHO avatar expression showcase](docs/media/echo-avatar-expressions.gif)](docs/media/echo-avatar-expressions.mp4)
 
----
+**[Play the full-resolution MP4](docs/media/echo-avatar-expressions.mp4)** — all seven avatars move through idle, listening, thinking, talking, and laughing states. The animation includes cursor-aware gaze, natural blinking, head and body motion, text-driven mouth shapes, happy squints, and animated laughter tears.
 
-## In-Depth Overview
-
-ECHO is a browser assistant that actually operates the browser. It reads the DOM into a numbered index of interactive elements, then clicks and types against those indices rather than pixel coordinates, which is what makes it survive scrolling, sticky headers and overlays. It can navigate, manage tabs, extract structured data, fill forms, record and replay multi-step workflows, monitor pages for changes, and hold a persistent conversation in a side panel.
-
-What separates it from a wrapper around a chat completion endpoint is that the language model is only one of four execution strategies, and the least-preferred one.
+Every avatar uses the real production animation component and recolors the floating assistant, side panel, and settings interface with its own theme.
 
 ---
 
-## The Routing Engine
+## What ECHO feels like to use
 
-This is the part of the project I would want to talk through in an interview.
+### On any webpage
 
-```text
-                        User request
-                             |
-                             v
-                  +----------------------+
-                  |    SMART ROUTER      |
-                  | classify -> dispatch |
-                  +----------+-----------+
-                             |
-     +----------------+------+-------+------------------+
-     v                v              v                  v
-+-----------+   +-----------+   +-----------+   +-----------------+
-|  TIER 0   |   |  TIER 1   |   |  TIER 2   |   |     TIER 3      |
-|  Instant  |   |  Cached   |   | On-device |   |   Cloud LLM     |
-+-----------+   +-----------+   +-----------+   +-----------------+
-| storage   |   | IndexedDB |   | Chrome    |   | Claude / Gemini |
-| DOM       |   | keyed on  |   | built-in  |   | Groq / Together |
-| regex     |   | normalised|   | AI, or a  |   | OpenRouter      |
-| site map  |   | query+URL |   | built-in  |   |                 |
-|           |   |           |   | extractive|   | agentic tool    |
-|           |   |           |   | summariser|   | loop            |
-+-----------+   +-----------+   +-----------+   +-----------------+
-   ~0 ms           <5 ms          ~500 ms          1-8 s
-   free            free            free           costs quota
-   ~60%            ~15%            ~10%             ~15%
-     |                |              |                  |
-     +----------------+------+-------+------------------+
-                             |
-                             v
-                    Answer, tagged with
-                    the tier that produced it
-                             |
-                     (Tier 3 results are
-                      written back to the
-                      Tier 1 cache)
-```
+Press `Ctrl/Cmd + Shift + E` to wake ECHO, click the avatar to speak, or long-press it to open the command bar.
 
-Any tier may return null, which means "I am not confident, pass it on". That single rule is what makes the design safe.
+![ECHO command bar open over a webpage](docs/screenshots/in-page-command-bar.png)
 
-### Tier 0 — Deterministic
+The floating assistant stays above the current page without replacing it. Quick actions provide one-click access to summarization, explanations, translation, form filling, page watching, and tab management.
 
-37 ordered intent rules matched against the request. Handles greetings, memory reads and writes, saved-task and workflow listings, direct navigation, site-scoped search, pattern extraction, form filling, workflow record and replay, and page watchers.
+### In the side panel
 
-The interesting problem here was **rule collision**. My first pass matched `\bhelp\b`, which meant "help me fill this form" returned the capabilities list instead of filling the form. `\bwatch\b` was worse: "watch this YouTube video" silently created a background page monitor. I built a small harness that replays a corpus of realistic phrasings through the rule list in order and reports which rule wins, which surfaced both bugs plus two more, and now guards against ordering regressions when rules are added.
+Press `Ctrl/Cmd + Shift + O` for a persistent conversation that follows you between tabs.
 
-Rules also decline at the handler level, not just the pattern level. "Open a new tab and search for headphones" matches the navigation pattern, but the handler sees the conjunction and the verb "search", recognises it as a multi-step task, and returns null so a real tier gets it.
+![ECHO side-panel conversation with local and cloud tier labels](docs/screenshots/side-panel-conversation.png)
 
-### Tier 1 — Response cache
+Every answer can show which intelligence tier produced it. The panel also displays token usage, local-routing statistics, remembered-site status, citations, recent browser actions, temporary chats, private-agent mode, saved skills, and attached tabs.
 
-An IndexedDB store keyed on the page URL plus a normalised form of the question, with a TTL chosen by question type: 3 minutes for anything time-sensitive (price, score, weather), 15 minutes for page-derived summaries, 24 hours for stable factual answers.
+### When ECHO notices an opportunity to help
 
-Normalisation strips filler and stopwords, so "summarize this page", "Can you summarize this page please?", "summarize the page" and "please summarize this page for me" all collapse to the identical key and hit the exact-match path. Near-misses fall back to a set-overlap similarity score with a 0.72 threshold, tuned against labelled pairs so that genuine rephrasings match (0.75-0.80) while different questions about the same page do not (0.25-0.50).
+With proactive suggestions enabled, ECHO can offer a local summary on a long article or help with an empty form. It does not start a model call until you accept.
 
-Questions are also scope-classified: "summarize this page" is cached per-URL, "what is the capital of France" is cached globally. Error strings are never cached, so a transient API failure cannot be replayed as an answer.
+![ECHO proactive suggestion](docs/screenshots/in-page-proactive-suggestion.png)
 
-### Tier 2 — On-device language work
+### When writing on the web
 
-Uses Chrome's built-in Gemini Nano via the `Summarizer` and `LanguageModel` APIs when the browser and hardware support it. Because that support is far from universal, it is feature-detected rather than assumed, and there is a **dependency-free extractive engine underneath it that always works**.
+Select text in a field and use ECHO Writer to rewrite it. Review the result, copy it, or replace only the original selection.
 
-That fallback is classic frequency-based sentence ranking: tokenise, drop stopwords, score each sentence by the summed frequency weight of its terms, normalise by the square root of sentence length so long sentences do not automatically win, apply a positional boost to the opening fifth of the document, take the top N and re-emit them in original reading order so the output still reads as prose. Question answering uses term-overlap passage retrieval with a threshold requiring at least a third of the question's content terms to appear.
-
-The threshold matters more than the ranking. Validated against a real article, it correctly surfaces the distance sentence for "how far away is the planet" and the instrument sentence for "what instrument was used" — and critically, returns **empty** for "what is the price of bitcoin", so the router falls through to the cloud instead of fabricating an answer from unrelated text.
-
-### Tier 3 — Cloud LLM
-
-The original agentic loop, now reached only when the tiers above have all declined. Five providers behind one interface, each with a different function-calling dialect.
+![ECHO Writer rewrite card](docs/screenshots/in-page-writer.png)
 
 ---
 
-## Token Economics
+## Install ECHO V2
 
-Reducing cost per cloud call was a separate exercise from routing, and produced the larger part of the improvement.
+### Option A — Use the ready-made ZIP
 
-**Tool schema tax.** The agentic loop resends every tool definition on every reasoning step. 25 tools at roughly 100 tokens each is ~2,500 tokens per step, so a five-step task spent ~12,500 tokens on schemas before any content. I split the set into 10 always-sent core tools and 15 conditionally-attached ones, selected by keyword against the request, and cut every description to a single line. Typical requests now carry ~800 tokens of schema instead of ~2,500.
+This is the easiest route for non-technical users.
 
-**Conversation growth.** Screen reads are large and accumulate. Before every request, all tool results except the most recent are collapsed to a short stub, so per-request size stays bounded no matter how many steps a task runs. Combined with a sliding window and a hard step cap, a long task can no longer spiral into a rate limit.
+1. [Download `Echo_Web_Assistant_v2.zip`](package%20for%20sharing/Echo_Web_Assistant_v2.zip).
+2. Unzip it. The extracted folder contains the production extension files.
+3. Open Chrome and enter `chrome://extensions` in the address bar.
+4. Turn on **Developer mode** in the upper-right corner.
+5. Choose **Load unpacked**.
+6. Select the extracted folder—the folder that contains `manifest.json`.
+7. Pin **ECHO Online** from Chrome's Extensions menu for easy access.
+8. Open ECHO's **Options** page to choose an avatar, provider, language, and privacy preferences.
 
-**Prompt caching.** On Anthropic, the system prompt and tool block are marked with `cache_control`, so repeated in-task requests bill the static prefix at the reduced cache-read rate.
+Chrome may remove a manually loaded extension when its source folder moves. Keep the extracted folder in a permanent location.
 
-**Wasted calls.** The original Gemini model list led with two models that did not exist, costing a guaranteed 404 round-trip before every task. Removing them was a two-line fix worth two requests per task.
+### Option B — Build from source
 
-Instrumentation is part of the feature: real token counts are read from each provider's usage fields and surfaced live, and the side panel shows the running split across all four tiers.
-
----
-
-## Reliability Work
-
-The bugs that mattered were not crashes. They were silent wrong behaviour.
-
-**Tab identity.** `open_url` created a new tab but returned the old tab's id, so every subsequent action — read, click, type — was dispatched to the page the user had left. "Go to YouTube and search for X" typed into the previous site. Tools now return the new tab id and all three provider loops track an `activeTabId` across `open_url` and `switch_tab`.
-
-**Navigation races.** Navigation resolved as soon as Chrome accepted the URL, so the agent read a blank or stale DOM. Both navigation tools now poll `chrome.tabs.get` until the tab reports `complete`, with a timeout so a hanging page cannot deadlock a task.
-
-**Malformed tool calls.** Llama models on Groq intermittently emit a call as raw text — `<function=open_url{"url":"..."}>` — instead of a structured `tool_calls` entry. Groq's parser then reads the whole string as the function name and returns a 400. Rather than surfacing that as a failure, the loop extracts the intended call from the `failed_generation` payload with a brace-balancing parser and executes it, recovering the turn transparently.
-
-**Error translation.** A Gemini quota error reporting `limit: 0` does not mean "you ran out", it means the key's project has no free-tier allocation at all, and the `retry in 31s` field in the payload is misleading. The error layer distinguishes the two and tells the user what will actually fix it instead of dumping raw JSON.
-
-**Prompt injection.** The proactive suggestion system posts messages on the page's own window, which means any script on the page can forge one. Rather than trusting the message, the receiver treats the action as an index into a fixed allowlist. A hostile page can at worst cause ECHO to offer one of its own harmless local commands.
-
-**Privacy boundaries.** The form filler refuses password, card, CVV, SSN, PIN and account-number fields by both input type and label pattern, never overwrites a field the user has already typed into, and never submits. The page indexer excludes login, checkout, auth and payment URLs.
-
----
-
-## Feature Breakdown
-
-**Page understanding**
-Indexed DOM reading (numbered interactive elements plus visible text), full-text extraction, table extraction to JSON, screenshot capture for genuinely visual questions.
-
-**Page control**
-Click and type by element index, key dispatch, scroll, find-and-highlight, form submission. Typing uses the native value setter so React and Vue controlled inputs register the change, which naive `.value` assignment silently fails to do.
-
-**Workflow recorder**
-Records clicks and typed values, storing each step as a ranked list of selector candidates plus the element's visible label. Playback walks the list until one resolves, falling back to label matching, which is what lets a recorded flow survive the hashed class names and generated ids that break single-selector automation. Typing is captured on commit rather than per keystroke, so a 20-character field is one step and not twenty. Password fields are never recorded.
-
-**Page watchers**
-Persist a URL, an optional selector and a condition (below, above, contains, disappears, any change). A `chrome.alarms` job opens the page in a background tab, reads the value, evaluates the condition and fires a desktop notification. Watchers re-arm when the condition relaxes and are rehydrated after a browser restart.
-
-**Site intelligence**
-Hand-built DOM profiles for 20 major sites, including direct search URL construction and named action selectors. "Search YouTube for lo-fi" becomes a URL construction, not an inference task.
-
-**Extractors**
-Emails, phone numbers, prices across five currencies, links, dates in three formats, social handles, headings. The phone matcher includes a plausibility filter that rejects long undelimited digit runs, which are order ids rather than numbers anyone dials.
-
-**Knowledge base**
-Pages you read are indexed locally and ranked on recall by weighted term hits across title, domain and body, with a recency decay term. Answers "what was that article about X" and "what did I read today" with no network call.
-
-**Highlights**
-Select text, save it, and it is re-injected via TreeWalker text matching when you return to the page. Exports to Markdown.
-
-**Proactive suggestions**
-Rule-based observation of dwell time, scroll depth and form shape. Offers a summary on a long read or to fill a long form. No model runs until the offer is accepted, and suggestions are rate-limited globally and suppressed while the user is typing.
-
-**Voice**
-Speech recognition runs in a sandboxed iframe so microphone permission works on any origin, with speech synthesis for replies and an optional hands-free mode that reopens the microphone after each answer.
-
----
-
-## Skills This Project Demonstrates
-
-I am currently targeting AI Engineer, BI Developer and Data Analyst/Scientist roles. This is a systems project rather than a modelling one, so here is an honest mapping of what transfers.
-
-**AI / LLM Engineering**
-Provider-agnostic abstraction over five LLM APIs with three incompatible function-calling dialects and a generic JSON-Schema to Google-Schema converter. Agentic reason-act-observe loops with step caps and abort handling. Context window management under a hard token budget. Prompt caching. Structured-output recovery from malformed model responses. Cost instrumentation from real provider usage fields. The central lesson — route work to the cheapest component that can do it correctly, and make every component able to say "I don't know" — is the same lesson that separates a production RAG system from a demo.
-
-**Data & Analytics**
-Information retrieval and ranking: TF-based sentence scoring with length normalisation and positional weighting, term-overlap passage retrieval, weighted multi-field search with recency decay. Similarity thresholds selected against labelled pairs rather than guessed. Schema design across four IndexedDB stores with indices, TTL eviction and size-bounded trimming. Text normalisation and entity extraction with precision-oriented filtering.
-
-**BI & Instrumentation**
-The routing telemetry is a small BI problem: define the metric that matters (share of requests avoiding paid inference), instrument the pipeline to capture it accurately at every branch, persist it, and surface it where the user makes decisions. The side panel is effectively a cost dashboard, with per-answer attribution so the number is auditable rather than asserted.
-
-**Software Engineering**
-TypeScript under `strict`, no `any` in module boundaries. Chrome MV3 constraints throughout: a service worker that is killed and restarted arbitrarily, so all state is persisted and connections lazily reopened; message passing across four contexts. Graceful degradation as a design rule — every storage helper resolves rather than throws, so losing IndexedDB costs you memory, not the request.
-
----
-
-## Technology Stack
-
-| Component | Technology | Focus |
-| :--- | :--- | :--- |
-| Language | TypeScript 5 | Strict mode across all 26 modules |
-| UI | React 19 | Content-script overlay, side panel, options page |
-| Build | webpack 5 + ts-loader | Five entry points, async chunking for the vendor AI SDKs only |
-| Platform | Chrome Extension MV3 | Service worker, side panel, alarms, notifications, downloads, context menus, commands |
-| Local storage | IndexedDB | Four stores: cache, knowledge base, highlights, with indices and TTL eviction |
-| Sync storage | chrome.storage.local | Settings, memory, workflows, watchers, transcript |
-| On-device AI | Chrome built-in AI | `Summarizer` / `LanguageModel`, feature-detected with a dependency-free fallback |
-| Cloud AI | Anthropic Claude | `@anthropic-ai/sdk`, with `cache_control` prompt caching |
-| Cloud AI | Google Gemini | `@google/genai`, four-model fallback chain |
-| Cloud AI | Groq / Together / OpenRouter | OpenAI-compatible REST, with malformed tool-call recovery |
-| Voice | Web Speech API | Sandboxed iframe for cross-origin microphone access |
-| Runtime deps | React, React DOM, two AI SDKs | No UI framework, no state library, no utility library |
-
----
-
-## Local Development
-
-### Prerequisites
-
-* Node.js 18 or later
-* Chrome or Edge with developer mode available
-* Optionally an API key from any one of Groq, Google AI Studio, Anthropic, Together AI or OpenRouter. Groq is the recommended starting point: genuinely free tier, fastest inference. The extension is substantially functional with no key at all.
-
-### Build
+Use this route if you want to inspect, modify, or contribute to the code.
 
 ```bash
-git clone https://github.com/thedeepakreddy/Echo---Web-Assistant-Extension-..git echo-web-assistant
-cd echo-web-assistant
+git clone https://github.com/thedeepakreddy/Echo-Web-Assistant-Extension.git
+cd Echo-Web-Assistant-Extension
 npm install
-npx webpack --config webpack.config.js
+npm run build
 ```
 
-The build emits to `dist/`.
+Then open `chrome://extensions`, enable **Developer mode**, select **Load unpacked**, and choose the generated `dist/` folder.
 
-### Load into the browser
+### Do I need an API key?
 
-1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. Click **Load unpacked** and select the `dist/` folder
-4. Right-click the ECHO icon, choose **Options**, pick a provider and paste a key
+No API key is required for local features such as direct navigation, page extraction, safe form filling, saved memories, workflow management, highlights, cached answers, and the built-in extractive summarizer.
 
-### Shortcuts
+An API key is required when a request reaches the cloud tier. ECHO supports:
 
-| Shortcut | Action |
-| :--- | :--- |
-| `Cmd/Ctrl + Shift + E` | Wake or dismiss the floating orb |
-| `Cmd/Ctrl + Shift + O` | Open the persistent side panel |
-| `Cmd/Ctrl + Shift + K` | Open the inline command box |
+| Provider | Best for | Configuration |
+| --- | --- | --- |
+| Anthropic Claude | Complex reasoning, tool use, cited web search | Anthropic Console key and model ID |
+| Google Gemini | General assistance and Google-grounded search | Google AI Studio key |
+| Groq | Fast responses and a useful free starting tier | Groq key and supported model |
+| Together AI | Open-model choice | Together key and model ID |
+| OpenRouter | Access to multiple hosted models | OpenRouter key and selected model |
 
-### Things to try
-
-```
-summarize this page
-extract all emails
-fill this form
-record a workflow          (then: stop recording and call it my routine)
-watch this page and tell me when the price drops below 800
-what did I read today
-search youtube for lo-fi
-```
-
-The first four run entirely on-device. The side panel tags each answer with the tier that produced it.
+API keys stay in Chrome's local extension storage. They are excluded from ECHO's data export.
 
 ---
 
-## Project Structure
+## First five minutes
+
+After installation, try these commands:
 
 ```text
-echo-web-assistant/
-├── manifest.json                  Chrome MV3 manifest
-├── webpack.config.js              Five entry points
-├── src/
-│   ├── background/                Service worker
-│   │   ├── smart-router.ts        Four-tier dispatch, the core of the design
-│   │   ├── local-brain.ts         Tier 0: 37 deterministic intent rules
-│   │   ├── response-cache.ts      Tier 1: TTL cache, query normalisation, similarity
-│   │   ├── knowledge-base.ts      Tier 1: page index and weighted ranked recall
-│   │   ├── highlights.ts          Tier 1: saved passages
-│   │   ├── local-llm.ts           Tier 2: built-in AI plus extractive fallback
-│   │   ├── brain.ts               Tier 3: five-provider agentic loop
-│   │   ├── site-knowledge.ts      DOM profiles for 20 sites
-│   │   ├── workflow-engine.ts     Record and replay orchestration
-│   │   ├── page-watcher.ts        Alarm-driven monitoring
-│   │   ├── tools.ts               Tool dispatch
-│   │   ├── db.ts                  IndexedDB layer
-│   │   ├── bus.ts                 Unified UI messaging
-│   │   └── auth.ts                Provider configuration
-│   ├── content/                   Injected into every page
-│   │   ├── actions.ts             Indexed DOM engine, 19 actions
-│   │   ├── recorder.ts            Selector generation and step replay
-│   │   ├── form-filler.ts         Field scoring and safe fill
-│   │   ├── extractors.ts          Pattern extraction
-│   │   ├── highlighter.ts         Selection capture and re-injection
-│   │   ├── passive-observer.ts    Rule-based proactive suggestions
-│   │   └── ui.tsx                 Reactor orb, chat, suggestion toast
-│   └── popup/
-│       ├── sidepanel.tsx          Persistent chat, tier badges, cost dashboard
-│       └── options.tsx            Provider and local-brain settings
-└── dist/                          Build output, load this folder
+summarize this page
+explain the selected text in simple words
+extract all emails from this page
+find every price on this page
+open YouTube and search for lo-fi music
+fill this form
+list my open tabs
+remember that I prefer short bullet points
+what did I read today?
+record a workflow
+watch this page and tell me when the price drops below 800
 ```
 
+Useful controls:
+
+| Action | Shortcut or gesture |
+| --- | --- |
+| Wake or hide the floating assistant | `Ctrl/Cmd + Shift + E` |
+| Open the persistent side panel | `Ctrl/Cmd + Shift + O` |
+| Open the in-page command bar | `Ctrl/Cmd + Shift + K` or long-press the avatar |
+| Start/stop voice input | Click the avatar |
+| Move the assistant | Drag the avatar |
+| Run a saved skill | Type `/shortcut` |
+| Attach an open tab to a question | Type `@` in the side-panel composer |
+| Ask from the address bar | Type `echo`, press `Space`, then enter a request |
+
 ---
 
-## What I Would Do Next
+## Interface tour
 
-Being straight about the current limits:
+### Floating in-page assistant
 
-* The Tier 0 rules are regular expressions. They are fast, debuggable and free, but they are brittle at the edges of natural phrasing. A small on-device intent classifier would generalise better, at the cost of the transparency that makes the current approach easy to reason about.
-* The extractive summariser is genuinely extractive. It selects real sentences and never invents, which is the right trade for a fallback, but it cannot compress or rephrase the way an abstractive model can.
-* The verification I ran against the routing rules, cache similarity thresholds and summariser quality lives in throwaway scripts. It belongs in a committed test suite with CI, and that is the next thing I would add.
-* Tier 2 depends on Chrome's built-in AI for its best output, which is not yet widely available. A bundled WebGPU model would close that gap at the cost of a large first-run download.
+The in-page experience includes:
+
+- Seven animated character choices plus the classic reactor orb.
+- Listening, thinking, speaking, error, and idle status feedback.
+- A glass command bar with voice input, stop control, text input, and quick actions.
+- A small response bubble beside the avatar.
+- ECHO Writer cards for selected text.
+- Proactive suggestion toasts.
+- A separately framed approval prompt for payments and sending messages.
+- Drag positioning saved across pages.
+
+| Command bar | Proactive help | ECHO Writer |
+| --- | --- | --- |
+| ![Command bar](docs/screenshots/in-page-command-bar.png) | ![Proactive suggestion](docs/screenshots/in-page-proactive-suggestion.png) | ![Writer card](docs/screenshots/in-page-writer.png) |
+
+### Persistent side panel
+
+The side panel is the main workspace for longer conversations and multi-step tasks.
+
+| Home | Conversation | History |
+| --- | --- | --- |
+| ![Side-panel home](docs/screenshots/side-panel-home.png) | ![Conversation](docs/screenshots/side-panel-conversation.png) | ![History](docs/screenshots/side-panel-history.png) |
+
+It includes:
+
+- Saved and temporary chats.
+- Tier badges for instant, cached, on-device, and cloud answers.
+- Cited sources for supported web-search answers.
+- Per-task and per-session cloud token counters.
+- The percentage of requests answered locally.
+- Page-memory controls for the active site.
+- Chat history with reopen and delete actions.
+- `/` skill completion and `@` tab completion.
+- Web-search and private-window switches.
+- A visible stop button while work is running.
+- Approval prompts and recent action logs.
+
+### Settings
+
+Settings are grouped in plain language so casual users can configure ECHO without understanding its architecture.
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/settings-appearance-and-provider.png" alt="Appearance settings and all avatars"></td>
+    <td><img src="docs/screenshots/settings-provider-and-local-brain.png" alt="Provider and local brain settings"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/settings-local-voice-personalization.png" alt="Local brain, voice and personalization settings"></td>
+    <td><img src="docs/screenshots/settings-memory-skills-privacy.png" alt="Memories, skills and privacy settings"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/settings-privacy-and-data-controls.png" alt="Privacy and data controls"></td>
+    <td><img src="docs/screenshots/settings-private-diagnostics-shortcuts.png" alt="Private browsing, diagnostics and shortcuts"></td>
+  </tr>
+</table>
+
+#### Appearance
+
+Choose one of seven animated ECHO personalities or the original reactor:
+
+| Appearance | Personality | Voice |
+| --- | --- | --- |
+| Echo | Friendly lab assistant | Female |
+| Echo Style | Style advisor | Female |
+| Echo Officer | Safety officer | Male |
+| Echo Patrol | Patrol partner | Female |
+| Echo Mentor | Wise mentor | Female |
+| Echo Visionary | Tech visionary | Male |
+| Echo Analyst | Skeptical analyst | Male |
+| Reactor | Classic arc-reactor orb | Uses the selected system voice |
+
+The selected character's palette automatically themes every ECHO surface.
+
+#### AI Provider
+
+Choose a provider, enter its API key, and select or enter a supported model. Only the active provider is used for cloud-tier requests.
+
+#### Local Brain
+
+- **Answer locally first:** tries deterministic, cached, and on-device answers before the cloud.
+- **Reuse past answers:** stores suitable answers and replays them for matching questions.
+- **On-device summarising:** uses Chrome's built-in AI when available, with an extractive fallback.
+- **Remember pages you read:** locally indexes allowed sites for later recall.
+- **Proactive suggestions:** offers help on long articles and forms without starting a cloud request.
+
+#### Voice
+
+- **Hands-free mode:** reopens the microphone after ECHO finishes speaking.
+- **Language:** English (US/UK), Hindi, Telugu, Tamil, Bengali, Spanish, French, and German.
+- **Web search:** automatic when useful, or only when explicitly requested.
+
+#### Personalization
+
+Set your name, preferred answer style, background information, and custom instructions. Personalization is stored locally and can be disabled or edited at any time.
+
+#### Memories
+
+Review, search, add, edit, reveal, forget, or delete remembered facts. You can also teach ECHO conversationally—for example, “remember that my city is Hyderabad.”
+
+#### Skills
+
+Skills are reusable prompts with short `/commands`. Create your own, edit existing ones, or restore the built-in set.
+
+#### Privacy and data controls
+
+- See how many pages are remembered.
+- Allow page memory one domain at a time.
+- Forget a domain and remove its saved pages and highlights.
+- Export ECHO data without API keys.
+- Delete remembered pages, cached answers, or all ECHO data.
+
+#### Private Agent Browsing
+
+Runs browser tasks in a separate incognito window with no normal cookies, logins, or browsing history. HTTPS is required, and payment or send actions still require approval. Chrome's **Allow in Incognito** permission must be enabled first.
+
+#### Diagnostics
+
+Checks browser permissions, the active tab, provider configuration, API-key presence, and model availability without sending a prompt or spending tokens.
 
 ---
-## 🚀 Coming Soon: ECHO Mac (Desktop Assistant)
 
-While the ECHO Web Extension rules your browser, **ECHO Mac** (currently 90% complete) is about to rule your entire operating system.
+## Complete feature guide
 
-ECHO Mac is a super-autonomous desktop assistant being built to operate completely outside the browser. It features mind-blowing capabilities that will make it feel like you have a true AI engineer sitting inside your machine. **Currently, ECHO Mac already boasts over 100+ active features.**
+### Understand pages
 
-**20 of the Mind-Blowing Features of ECHO Mac:**
-1. **Infinite Autonomous Cloning (The Best Feature):** ECHO Mac can literally clone itself an unlimited number of times. If you give it 10 massive tasks, it spawns 10 independent sub-agents that execute everything simultaneously in the background.
-2. **Full File-System Control:** Automatically read, write, and organize local files and folders.
-3. **Autonomous Software Engineer:** Clones repositories, reads Jira tickets, writes code, runs tests, and opens PRs completely unattended.
-4. **Vision OS Integration:** Natively sees the screen via Apple Screen Capture frameworks at 60fps.
-5. **Deep System Control:** Direct integration with Spotify, Mail, Calendar, and System Preferences via AppleScript.
-6. **Always-On Context:** Constantly learns from everything you do on your Mac to build a personalized, local AI brain.
-7. **Local Sandbox Execution:** Safely tests untrusted code in Docker containers automatically.
-8. **Overnight Work Mode:** Give ECHO Mac a massive, multi-step goal before you go to sleep, and it will work overnight to finish it.
-9. **Self-Healing Code:** Automatically detects runtime errors in your local environment, analyzes the stack trace, and applies patches.
-10. **Native Desktop Voice:** Speaks directly through MacOS CoreAudio with ultra-low latency conversational capabilities.
-11. **Intelligent Screen OCR:** Instantly reads and extracts text from videos, images, and unselectable UI elements across the whole OS.
-12. **Cross-App Workflows:** Can move files from Finder into Photoshop, apply edits, and email the result without human intervention.
-13. **Automated Meeting Proxy:** Attends Zoom or Google Meet calls on your behalf, records transcripts, and extracts action items.
-14. **Local LLM Hosting:** Runs massive AI models entirely locally on Apple Silicon (M-series) to guarantee zero latency and 100% privacy.
-15. **Database Architect:** Connects to local PostgreSQL/MySQL databases, analyzes schemas, and writes complex SQL migrations on demand.
-16. **Proactive System Maintenance:** Monitors CPU, RAM, and disk space, automatically clearing caches and optimizing performance.
-17. **Dynamic UI Generation:** Instantly codes and renders custom SwiftUI or React widgets on your desktop to display data you ask for.
-18. **Continuous Deployment Agent:** Monitors your local git branches and auto-deploys to AWS/Vercel when tests pass.
-19. **Semantic File Search:** Stop searching by file name. Just say "Find the PDF where the lawyer talked about the severance package," and it finds it instantly.
-20. **Automated Social Engineering:** Can log into LinkedIn on your browser, find leads, and send personalized connection requests.
-21. **Self-Evolving Architecture:** ECHO Mac rewrites its own core logic scripts to optimize its speed based on your daily usage patterns.
+- Read visible text and a numbered index of interactive elements.
+- Extract long pages in safe chunks rather than silently truncating them.
+- Summarize locally or with a selected AI provider.
+- Answer questions from page content.
+- Explain selected text in simple language.
+- Extract tables as structured JSON.
+- Capture the visible page for genuinely visual questions.
+- Find and highlight matching text.
+- Translate page content.
 
-Stay tuned. The future of operating systems is arriving soon.
+### Navigate and operate websites
 
-Built by Deepak Reddy.
+- Open URLs and wait for navigation to finish.
+- Click indexed elements rather than brittle pixel coordinates.
+- Type using native setters so React and Vue forms detect changes.
+- Press keys, scroll, switch tabs, close tabs, and list open tabs.
+- Search supported websites through direct search URLs.
+- Track the correct active tab across multi-step tasks.
+
+### Fill forms safely
+
+ECHO scores visible fields against saved profile information and fills only safe matches. It deliberately refuses:
+
+- Passwords.
+- Card numbers and CVV codes.
+- PINs.
+- Social-security numbers.
+- Bank or account numbers.
+- Fields that already contain user-entered text.
+
+It fills but does not submit the form. You remain in control of the final action.
+
+### Record and replay workflows
+
+Say **“record a workflow”**, perform a sequence, then stop and name it. ECHO records committed clicks, typing, dropdown choices, scrolling, and navigation.
+
+Each recorded element keeps several selector candidates plus a readable label. Playback tries them in order and falls back to label matching, making workflows more resilient to generated IDs and changing CSS classes. Password and payment fields are not recorded.
+
+### Monitor pages
+
+Create a watcher for:
+
+- Any content change.
+- A value moving below or above a threshold.
+- Text appearing.
+- An element disappearing.
+- A price reaching a target.
+
+Chrome alarms reopen the page in a background tab, evaluate the condition, and show a desktop notification. Watchers survive browser restarts and re-arm when their condition becomes false again.
+
+### Extract useful information
+
+Built-in local extractors find:
+
+- Email addresses.
+- Phone numbers with plausibility filtering.
+- Prices in multiple currencies.
+- Links.
+- Dates in common formats.
+- Social-media handles.
+- Page headings.
+- Tables and structured page content.
+
+### Remember pages and highlights
+
+- Opt in one site at a time.
+- Save selected passages as highlights.
+- Restore highlights when revisiting a page.
+- Export highlights as Markdown.
+- Ask “what did I read today?” or recall an article by topic.
+- Rank page memory by title, domain, body matches, and recency.
+
+ECHO automatically excludes private destinations such as mail, online documents, authentication pages, account pages, and token-bearing URLs.
+
+### Search the web with citations
+
+Claude and Gemini can perform live web searches when supported by the selected model and account. Search answers can include numbered markers and a source list in the side panel. Web search can be automatic or explicitly controlled per message.
+
+### Work with video
+
+On supported video pages, ECHO can retrieve and parse timed transcripts. This enables summaries, topic lookup, and questions about the spoken content without treating the visual page layout as the transcript.
+
+### Rewrite selected text
+
+ECHO Writer captures exactly the selected text inside an editable field. It refuses stale selections and secret fields, removes unwanted model wrappers, and offers **Copy** or **Replace** instead of changing the page automatically.
+
+### Use voice naturally
+
+- Speech recognition runs in a sandboxed extension frame so it works consistently across sites.
+- Spoken replies use browser speech synthesis.
+- Character voice gender remains consistent with the selected avatar.
+- Mouth shapes are generated from the reply text and corrected by speech boundary events when the browser provides them.
+- Hands-free mode continues the conversation after each answer.
+
+### Create reusable skills
+
+Turn a good prompt into `/tldr`, `/email`, `/explain`, or your own shortcut. Skills work in the side panel, page command bar, and address bar.
+
+### Attach tab context
+
+Type `@` in the side panel to attach an open tab. Attached content is fenced and explicitly treated as untrusted page data rather than system instructions.
+
+### Use a private agent window
+
+Private mode confines the task to a separate incognito window, requires HTTPS, and prevents tools from silently escaping back into the normal signed-in browsing context.
+
+---
+
+## How the local-first brain works
+
+```text
+User request
+     │
+     ▼
+┌──────────────────────┐
+│ Smart request router │
+└──────────┬───────────┘
+           │
+   ┌───────┼──────────┬────────────┐
+   ▼       ▼          ▼            ▼
+Tier 0   Tier 1     Tier 2       Tier 3
+Instant  Cache      On-device    Cloud model
+rules    + memory   AI/fallback  + tools
+   │       │          │            │
+   └───────┴──────────┴────────────┘
+           │
+           ▼
+ Answer with a visible tier label
+```
+
+| Tier | What it handles | Typical cost | Can decline? |
+| --- | --- | --- | --- |
+| Tier 0 — Instant | Direct navigation, memory lookups, extractors, workflows, form filling, watchers, tab commands | Free and local | Yes |
+| Tier 1 — Cached | Matching prior answers and local knowledge recall | Free and local | Yes |
+| Tier 2 — On-device | Summaries and page-grounded questions through Chrome AI or the extractive fallback | Free and local | Yes |
+| Tier 3 — Cloud | Open-ended reasoning, complex agentic tasks, and live web search | Uses provider quota | Final tier |
+
+The important rule is that each local tier may say **“I am not confident”** and pass the request onward. A fast local guess is not considered a success.
+
+### Why this saves tokens
+
+- Simple work never sends a prompt.
+- Repeated questions reuse suitable answers.
+- Old tool output is compacted before the next model step.
+- Only relevant tool definitions are sent for a request.
+- The agent loop has a hard step cap and abort support.
+- Cloud results can be written back to the cache.
+- Real provider usage fields feed the visible token counter.
+
+---
+
+## Privacy and safety model
+
+ECHO can operate websites, so its boundaries are designed to be visible and conservative.
+
+### Local by default
+
+- Settings, memories, workflows, watchers, highlights, chat history, and the page index live in Chrome storage or IndexedDB on the device.
+- Page memory is opt-in per domain.
+- Private sites and sensitive URL patterns are automatically excluded.
+- Data export omits API keys.
+
+### Approval before consequential actions
+
+ECHO asks before actions that can pay, send an email, or send a message. Approval is tied to the originating tab so another page cannot approve it.
+
+### Prompt-injection boundaries
+
+- Page text, attached tabs, browser results, and tool output are treated as untrusted data.
+- Proactive page messages may only select from a fixed allowlist of harmless local actions.
+- Navigation rejects executable schemes such as `javascript:` and `data:`.
+- Screenshot capture refuses to capture a different active tab.
+
+### Important permission explanations
+
+| Permission | Why ECHO needs it |
+| --- | --- |
+| `activeTab` / `scripting` | Read and interact with the page you ask ECHO to use |
+| `tabs` | Navigate, switch, list, and manage tabs during tasks |
+| `storage` / `unlimitedStorage` | Save settings, chats, workflows, cache, highlights, and local knowledge |
+| `sidePanel` | Provide persistent chat beside the webpage |
+| `alarms` / `notifications` | Check page watchers and notify you when conditions match |
+| `downloads` | Export user-requested data and highlights |
+| `contextMenus` | Offer ECHO actions on selected page text |
+| `<all_urls>` host access | Run the assistant on the sites where you explicitly invoke it |
+
+---
+
+## Troubleshooting
+
+### ECHO does not appear on a page
+
+1. Reload the page after installing or rebuilding the extension.
+2. Press `Ctrl/Cmd + Shift + E`.
+3. Confirm the extension is enabled at `chrome://extensions`.
+4. Chrome does not allow extensions to run on some internal pages such as `chrome://settings`.
+
+### The cloud provider does not answer
+
+1. Open ECHO **Options**.
+2. Confirm the selected provider, API key, and model.
+3. Run **Diagnostics → Health check**.
+4. Check that the provider account has quota and access to the selected model.
+5. Try a local command such as “extract all emails” to verify the extension itself is working.
+
+### Voice input does not work
+
+- Allow microphone access when Chrome asks.
+- Confirm the selected language in **Settings → Voice**.
+- Close other applications that may exclusively hold the microphone.
+- Reload the webpage after changing extension permissions.
+
+### Private browsing says setup is required
+
+Open `chrome://extensions`, select ECHO's **Details**, and enable **Allow in Incognito**. ECHO does not enable this permission automatically.
+
+### A recorded workflow cannot find an element
+
+The website may have changed its labels or layout. Record that step again. ECHO deliberately avoids replaying against ambiguous or sensitive elements.
+
+### Chrome says the unpacked extension is missing
+
+The extracted or `dist/` folder was probably moved. Remove the broken entry from `chrome://extensions` and load the folder again from its permanent location.
+
+---
+
+## Developer guide
+
+### Technology
+
+| Area | Implementation |
+| --- | --- |
+| Language | TypeScript 5 in strict mode |
+| UI | React 19 with custom CSS and no component framework |
+| Build | webpack 5 and `ts-loader` |
+| Platform | Chrome Extension Manifest V3 |
+| Background | Restart-safe service worker with persisted task state |
+| Local data | Chrome storage plus IndexedDB |
+| On-device AI | Chrome `Summarizer` / `LanguageModel`, feature-detected |
+| Cloud AI | Claude, Gemini, Groq, Together AI, OpenRouter |
+| Voice | Web Speech API in a sandboxed extension frame |
+| Testing | Node's built-in test runner with TypeScript module harnesses |
+
+### Architecture
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ User interfaces                                              │
+│ Floating avatar + command bar │ Side panel │ Settings        │
+└───────────────────────────────┬──────────────────────────────┘
+                                │ Chrome messages
+┌───────────────────────────────▼──────────────────────────────┐
+│ MV3 background service worker                               │
+│ Router · local brain · cache · provider brain · safety bus  │
+│ workflows · watchers · chats · memories · web search        │
+└───────────────┬───────────────────────────┬──────────────────┘
+                │                           │
+┌───────────────▼──────────────┐  ┌────────▼──────────────────┐
+│ Content script              │  │ Local persistence         │
+│ DOM index · actions         │  │ Chrome storage · IndexedDB│
+│ recorder · form filler      │  │ cache · KB · highlights   │
+│ highlighter · writer        │  └───────────────────────────┘
+│ transcript · page UI        │
+└──────────────────────────────┘
+```
+
+### Project structure
+
+```text
+.
+├── manifest.json                    Chrome MV3 manifest
+├── webpack.config.js                Production bundling
+├── src/
+│   ├── background/
+│   │   ├── smart-router.ts          Four-tier request dispatch
+│   │   ├── local-brain.ts           Deterministic intent rules
+│   │   ├── response-cache.ts        Normalized TTL answer cache
+│   │   ├── local-llm.ts             Chrome AI + extractive fallback
+│   │   ├── brain.ts                 Cloud provider agent loops
+│   │   ├── safety.ts                Navigation and approval boundaries
+│   │   ├── workflow-engine.ts       Record/replay orchestration
+│   │   ├── page-watcher.ts          Alarm-driven monitoring
+│   │   ├── knowledge-base.ts        Local page recall
+│   │   ├── chats.ts                 Saved and temporary chats
+│   │   └── tools.ts                 Browser tool dispatch
+│   ├── content/
+│   │   ├── actions.ts               Indexed DOM and browser actions
+│   │   ├── avatar.tsx               Real-time avatar animation engine
+│   │   ├── ui.tsx                   Floating assistant and command bar
+│   │   ├── recorder.ts              Resilient selector capture/replay
+│   │   ├── form-filler.ts           Safe profile-based form filling
+│   │   ├── writer.ts                Selection-bound rewrite flow
+│   │   └── video-transcript.ts      Timed transcript parsing
+│   ├── popup/
+│   │   ├── sidepanel.tsx            Persistent chat workspace
+│   │   └── options.tsx              Complete settings interface
+│   ├── characters/                  Character registry and themes
+│   └── assets/characters/           Layered avatar artwork
+├── tests/extension.test.cjs         Security, routing, workflow and UI logic tests
+├── tools/avatar/                     Avatar asset-generation pipeline
+├── tools/docs/                       Reproducible screenshot/video harness
+├── docs/screenshots/                 README screenshots
+└── docs/media/                       Avatar MP4, GIF preview and poster
+```
+
+### Commands
+
+| Command | Purpose |
+| --- | --- |
+| `npm install` | Install dependencies |
+| `npm run build` | Build the production extension into `dist/` |
+| `npm test` | Run the automated test suite |
+| `npm run docs:showcase` | Build the documentation sandbox |
+| `npm run docs:capture` | Rebuild and regenerate screenshots plus avatar video; requires Chrome and FFmpeg |
+
+### Testing coverage
+
+The committed suite currently exercises 40 behaviors, including:
+
+- Page-scoped cache isolation.
+- Sensitive-field redaction and typing refusal.
+- Executable URL rejection.
+- Private-site and token-bearing URL exclusions.
+- Tab-bound action approval.
+- Service-worker restart recovery.
+- Long-page chunking.
+- Active-tab screenshot safety.
+- Workflow recording and replay.
+- Dropdown and multi-select restoration.
+- Skills and chat-history behavior.
+- Personalization and temporary-chat isolation.
+- Citation parsing.
+- Video transcript parsing.
+- ECHO Writer selection safety.
+- Attached-tab prompt-injection fencing.
+- Incognito task confinement.
+- Character/voice matching.
+- On-device AI timeout behavior.
+
+### Documentation media
+
+`tools/docs/capture-media.mjs` mounts the real production React components inside a deterministic local sandbox. Sample names, memories, chats, and URLs are fictional; no developer profile, API key, or browsing history is captured. The avatar reel uses the production `EchoAvatar` animation component and source artwork.
+
+To regenerate everything:
+
+```bash
+npm run docs:capture
+```
+
+Requirements: macOS with Google Chrome at its standard application path and `ffmpeg` available on `PATH`.
+
+---
+
+## Current limitations
+
+- The deterministic intent layer is deliberately conservative and can decline unfamiliar phrasing.
+- Chrome's highest-quality built-in AI path is hardware- and browser-dependent; the extractive fallback remains available.
+- A recorded workflow can require re-recording after a website significantly changes its labels or structure.
+- Browser speech recognition and installed voices vary by operating system.
+- Web search availability depends on the selected provider, model, account, and quota.
+- This repository currently distributes an unpacked extension ZIP rather than a Chrome Web Store release.
+
+---
+
+## Contributing
+
+1. Create a short-lived feature branch.
+2. Keep changes focused and commits atomic.
+3. Run `npm test` and `npm run build`.
+4. Include screenshots for visible interface changes.
+5. Never commit real API keys, browser profiles, private page content, or generated `dist/` output.
+6. Explain user-facing behavior and privacy implications in the pull request.
+
+---
+
+## License
+
+ISC. See [package.json](package.json) for the current package metadata.

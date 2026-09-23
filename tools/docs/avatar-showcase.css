@@ -1,0 +1,70 @@
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body {
+  color: #f7f7ff;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+  background:
+    radial-gradient(circle at 15% 10%, rgba(88, 69, 173, 0.42), transparent 34%),
+    radial-gradient(circle at 90% 24%, rgba(30, 132, 144, 0.28), transparent 30%),
+    radial-gradient(circle at 55% 100%, rgba(158, 55, 128, 0.27), transparent 42%),
+    #070810;
+}
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.35;
+  background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+  background-size: 42px 42px;
+  mask-image: radial-gradient(ellipse at center, black 20%, transparent 82%);
+}
+.showcase { width: 1920px; height: 1080px; padding: 54px 70px 34px; display: grid; grid-template-rows: 142px 1fr 46px; gap: 18px; }
+.showcase > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 44px; }
+.eyebrow { margin: 0 0 11px; color: #b8a1ff; font-size: 15px; font-weight: 750; letter-spacing: .19em; }
+h1 { margin: 0; font-size: 47px; line-height: 1; letter-spacing: -.04em; }
+.subtitle { margin: 14px 0 0; max-width: 850px; color: rgba(238,240,255,.68); font-size: 18px; line-height: 1.4; }
+.phase {
+  --phase-color: #b8a1ff;
+  position: relative;
+  width: 520px;
+  min-height: 96px;
+  padding: 20px 24px 19px 64px;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 22px;
+  background: radial-gradient(120% 130% at 0 0, color-mix(in srgb, var(--phase-color) 18%, transparent), transparent 60%), rgba(20,22,34,.72);
+  box-shadow: inset 0 1px rgba(255,255,255,.16), 0 24px 60px rgba(0,0,0,.3);
+  overflow: hidden;
+}
+.phase-listening { --phase-color: #7fd6ff; }
+.phase-thinking { --phase-color: #a78bfa; }
+.phase-speaking, .phase-laughing { --phase-color: #ff9fd0; }
+.phase-dot { position: absolute; left: 25px; top: 25px; width: 18px; height: 18px; border-radius: 50%; background: var(--phase-color); box-shadow: 0 0 20px var(--phase-color); }
+.phase strong { display: block; text-transform: capitalize; font-size: 25px; line-height: 1; }
+.phase small { display: block; margin-top: 9px; color: rgba(238,240,255,.65); font-size: 13px; }
+.phase i { position: absolute; left: 0; bottom: 0; height: 3px; background: linear-gradient(90deg, var(--phase-color), #fff); box-shadow: 0 0 12px var(--phase-color); }
+.character-grid { display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(2, 1fr); gap: 18px; }
+.showcase-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  align-items: end;
+  min-width: 0;
+  padding: 14px 18px 14px 8px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 26px;
+  background:
+    radial-gradient(circle at 24% 20%, color-mix(in srgb, var(--e-accent) 18%, transparent), transparent 48%),
+    linear-gradient(145deg, rgba(255,255,255,.09), rgba(255,255,255,.02)),
+    rgba(14,16,25,.72);
+  box-shadow: inset 0 1px rgba(255,255,255,.17), 0 20px 50px rgba(0,0,0,.23);
+  overflow: visible;
+}
+.showcase-card:last-child { grid-column: 2 / 4; width: calc(50% - 9px); justify-self: center; }
+.showcase-card #echo-root-wrapper.avatar-mode { position: relative; width: 178px; height: 223px; }
+.showcase-card .av-thought { transform: translateY(8px) scale(.52); }
+.character-copy { align-self: center; min-width: 0; padding-left: 10px; }
+.character-copy strong { display: block; font-size: 25px; letter-spacing: -.025em; }
+.character-copy span { display: block; margin-top: 5px; color: color-mix(in srgb, var(--e-accent) 72%, #fff); font-size: 14px; line-height: 1.3; }
+footer { display: flex; align-items: center; justify-content: center; gap: 14px; color: rgba(238,240,255,.56); font-size: 13px; }
+footer span { padding: 7px 13px; border: 1px solid rgba(255,255,255,.1); border-radius: 999px; background: rgba(255,255,255,.035); }
