@@ -37,14 +37,19 @@ function isVisible(el: Element): boolean {
 
 function describe(el: HTMLElement): string {
   const tag = el.tagName.toLowerCase();
-  const anyEl = el as any;
+  const inputType = tag === 'input' ? ((el as HTMLInputElement).type || 'text').toLowerCase() : '';
+  // Never expose a field's current value to a model. Passwords are especially
+  // dangerous, but email, payment, and one-time-code fields can be secrets too.
+  const controlText = tag === 'input' || tag === 'textarea' || el.isContentEditable
+    ? ''
+    : (el as HTMLElement).innerText || '';
   let label = (
-    anyEl.innerText ||
-    anyEl.value ||
+    controlText ||
     el.getAttribute('aria-label') ||
     el.getAttribute('placeholder') ||
     el.getAttribute('title') ||
     el.getAttribute('name') ||
+    (inputType === 'button' || inputType === 'submit' ? (el as HTMLInputElement).value : '') ||
     el.getAttribute('alt') ||
     ''
   ).replace(/\s+/g, ' ').trim();
@@ -59,30 +64,38 @@ function describe(el: HTMLElement): string {
   return `<${kind}> "${label.substring(0, LABEL_MAX)}"`;
 }
 
+function sensitiveField(el: HTMLElement): boolean {
+  const hints = [el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('id'),
+    el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')]
+    .filter(Boolean).join(' ');
+  return /pass(word|wd)|\b(cvv|cvc|otp|pin|ssn|token|secret|verification.?code|security.?code)\b|credit.?card|card.?number|\bcc-(number|csc|exp)/i.test(hints);
+}
+
 export function handleDomAction(action: string, args: any): any {
   switch (action) {
     case 'read_screen': {
       echoElements = [];
-      const candidates = Array.from(document.querySelectorAll<HTMLElement>(INTERACTIVE_SELECTOR));
+      const candidates = Array.from(document.querySelectorAll<HTMLElement>(INTERACTIVE_SELECTOR)).filter(isVisible).slice(0, 300);
+      echoElements = candidates;
+      const offset = Math.min(275, Math.max(0, Math.floor(Number(args?.offset) || 0)));
       let screenInfo = 'Numbered interactive elements (use the number with click_element / type_text):\n';
 
-      for (const el of candidates) {
-        if (echoElements.length >= MAX_ELEMENTS) break;
-        if (!isVisible(el)) continue;
+      for (let idx = offset; idx < Math.min(offset + MAX_ELEMENTS, candidates.length); idx++) {
+        const el = candidates[idx];
         // Skip elements whose only content is another interactive we already have
         // (keeps the list focused on leaf controls).
         const desc = describe(el);
-        const idx = echoElements.length;
-        echoElements.push(el);
         screenInfo += `[${idx}] ${desc}\n`;
       }
 
-      if (echoElements.length === 0) {
+      if (candidates.length === 0) {
         screenInfo += '(no interactive elements visible — try scrolling)\n';
+      } else if (offset + MAX_ELEMENTS < candidates.length) {
+        screenInfo += `More controls available. Call read_screen with offset ${offset + MAX_ELEMENTS}.\n`;
       }
 
       let pageText = (document.body?.innerText || '').replace(/\n\s*\n/g, '\n').trim();
-      pageText = pageText.substring(0, PAGE_TEXT_MAX);
+      pageText = offset === 0 ? pageText.substring(0, PAGE_TEXT_MAX) : '(omitted on later control pages)';
 
       const url = location.href;
       const title = document.title;
@@ -97,6 +110,9 @@ export function handleDomAction(action: string, args: any): any {
       if (!el) {
         return { success: false, error: `No element [${args.index}]. Call read_screen again to refresh the numbered list.` };
       }
+      if (!el.isConnected || (args.expectedLabel && describe(el) !== args.expectedLabel)) {
+        return { success: false, error: 'The page changed after approval. Read the screen again.' };
+      }
       try {
         el.scrollIntoView({ block: 'center', inline: 'center' });
       } catch { /* ignore */ }
@@ -110,6 +126,15 @@ export function handleDomAction(action: string, args: any): any {
       const el = echoElements[idx] as HTMLInputElement | HTMLTextAreaElement | HTMLElement;
       if (!el) {
         return { success: false, error: `No element [${args.index}]. Call read_screen again to refresh the numbered list.` };
+      }
+      if (!el.isConnected || (args.expectedLabel && describe(el as HTMLElement) !== args.expectedLabel)) {
+        return { success: false, error: 'The field changed after approval. Read the screen again.' };
+      }
+      if (!['INPUT', 'TEXTAREA'].includes(el.tagName) && !el.isContentEditable) {
+        return { success: false, error: 'That element is not an editable field.' };
+      }
+      if (sensitiveField(el as HTMLElement)) {
+        return { success: false, error: 'ECHO will not type into password, payment, or verification fields.' };
       }
       const text = String(args.text ?? '');
       const el2 = el as HTMLElement;
@@ -194,8 +219,28 @@ export function handleDomAction(action: string, args: any): any {
     case 'get_page_text': {
       const main = document.querySelector('article, main, [role="main"]') as HTMLElement | null;
       const source = main && main.innerText.length > 200 ? main : document.body;
-      const text = (source?.innerText || '').replace(/\n\s*\n/g, '\n').trim().substring(0, 3000);
-      return { success: true, result: `TITLE: ${document.title}\n\n${text}` };
+      const full = (source?.innerText || '').replace(/\n\s*\n/g, '\n').trim();
+      const offset = Math.min(full.length, Math.max(0, Math.floor(Number(args?.offset) || 0)));
+      const end = Math.min(full.length, offset + 4000);
+      const text = full.substring(offset, end);
+      return { success: true, result: `TITLE: ${document.title}\nTEXT: ${offset}-${end} of ${full.length}\n${end < full.length ? `NEXT_OFFSET: ${end}\n` : ''}\n${text}` };
+    }
+
+    case 'inspect_action': {
+      const wanted = String(args.action || '');
+      const index = Number(args.index);
+      let el = Number.isInteger(index) ? echoElements[index] : undefined;
+      if (!el && wanted === 'click_selector') {
+        const selectors: string[] = Array.isArray(args.selectors) ? args.selectors : [String(args.selector || '')];
+        for (const selector of selectors) {
+          try { el = document.querySelector<HTMLElement>(selector) || undefined; } catch { /* try next */ }
+          if (el) break;
+        }
+      }
+      return { success: true, result: {
+        label: el ? describe(el) : 'an element on this page',
+        sensitive: !!el && sensitiveField(el),
+      } };
     }
 
     case 'extract_table': {
@@ -229,6 +274,9 @@ export function handleDomAction(action: string, args: any): any {
         try {
           const el = Array.from(document.querySelectorAll<HTMLElement>(sel)).find(isVisible);
           if (!el) continue;
+          if (args.expectedLabel && describe(el) !== args.expectedLabel) {
+            return { success: false, error: 'The target changed after approval.' };
+          }
           try { el.scrollIntoView({ block: 'center' }); } catch { /* ignore */ }
           el.click();
           return { success: true, result: { clicked: true, selector: sel } };

@@ -7,6 +7,11 @@ declare global {
 }
 
 let recognition: any = null;
+const channel = new URL(location.href).searchParams.get('channel') || '';
+
+function report(event: string, extra: Record<string, unknown> = {}) {
+  chrome.runtime.sendMessage({ type: 'ECHO_SPEECH_EVENT', channel, event, ...extra }).catch(() => {});
+}
 
 // Initialize SpeechRecognition
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -17,7 +22,7 @@ if (SpeechRecognition) {
   recognition.lang = 'en-US';
 
   recognition.onstart = () => {
-    window.parent.postMessage({ type: 'ECHO_SPEECH_START' }, '*');
+    report('start');
   };
 
   recognition.onresult = (event: any) => {
@@ -28,27 +33,30 @@ if (SpeechRecognition) {
       }
     }
     if (finalTranscript) {
-      window.parent.postMessage({ type: 'ECHO_SPEECH_RESULT', text: finalTranscript }, '*');
+      report('result', { text: finalTranscript });
     }
   };
 
   recognition.onerror = (event: any) => {
-    window.parent.postMessage({ type: 'ECHO_SPEECH_ERROR', error: event.error }, '*');
+    report('error', { error: String(event.error || 'speech error') });
   };
 
   recognition.onend = () => {
-    window.parent.postMessage({ type: 'ECHO_SPEECH_END' }, '*');
+    report('end');
   };
 }
 
-window.addEventListener('message', (event) => {
-  if (event.data.type === 'START_RECOGNITION' && recognition) {
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type !== 'ECHO_SPEECH_CONTROL_DELIVER' || message.channel !== channel) return;
+  if (message.command === 'start' && recognition) {
+    const language = String(message.language || 'en-US');
+    if (/^[a-z]{2,3}(?:-[A-Z]{2})?$/.test(language)) recognition.lang = language;
     try {
       recognition.start();
     } catch (e) {
       // ignore already started
     }
-  } else if (event.data.type === 'STOP_RECOGNITION' && recognition) {
+  } else if (message.command === 'stop' && recognition) {
     recognition.stop();
   }
 });

@@ -6,19 +6,38 @@
 // hashed attributes that break single-selector automation.
 
 export interface RecordedStep {
-  type: 'click' | 'type' | 'key' | 'scroll' | 'navigate';
+  type: 'click' | 'type' | 'key' | 'scroll' | 'navigate' | 'select';
   selectors?: string[];
   label?: string;
   value?: string;
   url?: string;
   ms?: number;
+  id?: string;
+  at?: number;
+  /** For 'select': the chosen option(s), by value and visible text. */
+  options?: SelectedOption[];
 }
+
+export interface SelectedOption { value: string; text: string }
 
 let recording = false;
 let steps: RecordedStep[] = [];
 let lastTypedTarget: HTMLElement | null = null;
 let scrollTimer: number | null = null;
 let badge: HTMLElement | null = null;
+const SENSITIVE = /pass(word|wd)|\b(cvv|cvc|otp|pin|ssn|token|secret|security.?code|verification.?code)\b|credit.?card|card.?number|\bcc-(number|csc|exp)/i;
+
+function isSensitive(el: HTMLElement): boolean {
+  return SENSITIVE.test(['type', 'name', 'id', 'autocomplete', 'aria-label', 'placeholder']
+    .map(k => el.getAttribute(k) || '').join(' '));
+}
+
+function capture(step: RecordedStep) {
+  const saved = { ...step, id: crypto.randomUUID(), at: Date.now() };
+  steps.push(saved);
+  chrome.runtime.sendMessage({ type: 'ECHO_RECORD_STEP', step: saved }).catch(() => {});
+  updateBadge();
+}
 
 // --- selector generation ---------------------------------------------------
 
@@ -90,7 +109,7 @@ function labelOf(el: HTMLElement): string {
     el.getAttribute('placeholder') ||
     el.getAttribute('title') ||
     el.getAttribute('name') ||
-    el.getAttribute('value') ||
+    (['button', 'submit'].includes((el.getAttribute('type') || '').toLowerCase()) ? el.getAttribute('value') : '') ||
     ''
   );
   return String(raw).replace(/\s+/g, ' ').trim().slice(0, 60);
@@ -140,7 +159,7 @@ function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement, value: strin
 /** Execute one recorded step against the live page. */
 export function playStep(step: RecordedStep): { success: boolean; error?: string; result?: string } {
   if (step.type === 'scroll') {
-    window.scrollBy({ top: Number(step.value) || 0, behavior: 'smooth' });
+    window.scrollTo({ top: Number(step.value) || 0, behavior: 'smooth' });
     return { success: true, result: 'scrolled' };
   }
   if (step.type === 'key') {
@@ -156,6 +175,9 @@ export function playStep(step: RecordedStep): { success: boolean; error?: string
 
   const el = resolveStep(step);
   if (!el) return { success: false, error: `Could not find "${step.label || step.selectors?.[0] || step.type}"` };
+  if ((step.type === 'type' || step.type === 'select') && isSensitive(el)) {
+    return { success: false, error: 'Sensitive fields cannot be filled by a workflow.' };
+  }
 
   try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch { /* ignore */ }
 
@@ -173,7 +195,39 @@ export function playStep(step: RecordedStep): { success: boolean; error?: string
     }
     return { success: true, result: `typed into ${step.label || 'field'}` };
   }
+  if (step.type === 'select') return chooseOptions(el, step);
   return { success: false, error: `Unknown step type ${step.type}` };
+}
+
+function optionText(o: HTMLOptionElement): string {
+  return (o.text || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
+/**
+ * Re-select recorded options. Match value+text first, then visible text (sites
+ * often renumber option values), then value alone.
+ */
+function chooseOptions(el: HTMLElement, step: RecordedStep): { success: boolean; error?: string; result?: string } {
+  if (el.tagName !== 'SELECT') return { success: false, error: `"${step.label || 'That control'}" is no longer a dropdown.` };
+  const select = el as HTMLSelectElement;
+  const all = Array.from(select.options);
+  const chosen = new Set<HTMLOptionElement>();
+  for (const want of step.options || []) {
+    const hit = all.find(o => o.value === want.value && optionText(o) === want.text)
+      || all.find(o => optionText(o) === want.text)
+      || all.find(o => o.value === want.value);
+    if (!hit) return { success: false, error: `Couldn't find option "${want.text || want.value}" in ${step.label || 'the dropdown'}.` };
+    chosen.add(hit);
+  }
+  if (!chosen.size) return { success: false, error: 'No option was recorded for this dropdown.' };
+
+  select.focus();
+  if (select.multiple) all.forEach(o => { o.selected = chosen.has(o); });
+  else select.selectedIndex = all.indexOf([...chosen][0]);
+  select.dispatchEvent(new Event('input', { bubbles: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+  const names = [...chosen].map(optionText).join(', ');
+  return { success: true, result: `chose ${names} in ${step.label || 'dropdown'}` };
 }
 
 // --- recording -------------------------------------------------------------
@@ -185,13 +239,17 @@ function onClick(e: MouseEvent) {
   if (el.closest('#echo-extension-root')) return; // never record ECHO's own UI
 
   // Attribute the click to the nearest real control, not a nested <span>.
+  // Native dropdowns are recorded from their change event (onChange); the
+  // click that opens one does nothing on replay.
+  if (el.closest('select')) return;
+
   const actionable = (el.closest(
     'a,button,input,select,textarea,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[onclick],[contenteditable="true"]'
   ) as HTMLElement) || el;
+  if (isSensitive(actionable)) return;
 
   flushTyping();
-  steps.push({ type: 'click', selectors: buildSelectors(actionable), label: labelOf(actionable) });
-  updateBadge();
+  capture({ type: 'click', selectors: buildSelectors(actionable), label: labelOf(actionable) });
 }
 
 /**
@@ -204,7 +262,7 @@ function onInput(e: Event) {
   if (!el || el.closest('#echo-extension-root')) return;
   if (!/^(INPUT|TEXTAREA)$/.test(el.tagName) && !el.isContentEditable) return;
   const type = (el.getAttribute('type') || '').toLowerCase();
-  if (type === 'password') return; // never record secrets
+  if (type === 'password' || isSensitive(el)) return; // never record secrets
   lastTypedTarget = el;
 }
 
@@ -214,16 +272,28 @@ function flushTyping() {
   lastTypedTarget = null;
   const value = el.isContentEditable ? (el.textContent || '') : (el as HTMLInputElement).value;
   if (!value) return;
-  steps.push({ type: 'type', selectors: buildSelectors(el), label: labelOf(el), value });
-  updateBadge();
+  capture({ type: 'type', selectors: buildSelectors(el), label: labelOf(el), value });
+}
+
+/** A native <select> changed: record which option(s) were chosen. */
+function onChange(e: Event) {
+  if (!recording) return;
+  const el = e.target as HTMLElement;
+  if (!el || el.tagName !== 'SELECT' || el.closest('#echo-extension-root')) return;
+  if (isSensitive(el)) return; // e.g. card expiry month
+  const select = el as HTMLSelectElement;
+  const options = Array.from(select.selectedOptions || [])
+    .slice(0, 50).map(o => ({ value: o.value.slice(0, 200), text: optionText(o) }));
+  if (!options.length) return;
+  flushTyping();
+  capture({ type: 'select', selectors: buildSelectors(select), label: labelOf(select), options });
 }
 
 function onKeyDown(e: KeyboardEvent) {
   if (!recording) return;
   if (e.key === 'Enter') {
     flushTyping();
-    steps.push({ type: 'key', value: 'Enter' });
-    updateBadge();
+    capture({ type: 'key', value: 'Enter' });
   }
 }
 
@@ -234,8 +304,7 @@ function onScroll() {
   scrollTimer = window.setTimeout(() => {
     const last = steps[steps.length - 1];
     if (last?.type === 'scroll') return;
-    steps.push({ type: 'scroll', value: String(Math.round(window.scrollY)) });
-    updateBadge();
+    capture({ type: 'scroll', value: String(Math.round(window.scrollY)) });
   }, 500);
 }
 
@@ -265,11 +334,13 @@ function hideBadge() {
 }
 
 export function startRecording(): { success: boolean; result: string } {
+  if (recording) return { success: true, result: 'already recording' };
   steps = [];
   lastTypedTarget = null;
   recording = true;
   document.addEventListener('click', onClick, true);
   document.addEventListener('input', onInput, true);
+  document.addEventListener('change', onChange, true);
   document.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('scroll', onScroll, { passive: true });
   showBadge();
@@ -281,6 +352,7 @@ export function stopRecording(): { success: boolean; result: { steps: RecordedSt
   recording = false;
   document.removeEventListener('click', onClick, true);
   document.removeEventListener('input', onInput, true);
+  document.removeEventListener('change', onChange, true);
   document.removeEventListener('keydown', onKeyDown, true);
   window.removeEventListener('scroll', onScroll);
   if (scrollTimer) { window.clearTimeout(scrollTimer); scrollTimer = null; }

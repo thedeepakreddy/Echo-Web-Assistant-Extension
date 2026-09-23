@@ -8,9 +8,7 @@ import { countFillableFields } from './form-filler';
 
 export interface Suggestion { text: string; action: string }
 
-const SHOWN_KEY = 'echo_suggest_shown';
 const DWELL_MS = 150_000;      // ~2.5 min on one page
-const COOLDOWN_MS = 600_000;   // at most one suggestion per 10 min, globally
 
 let started = false;
 let arrivedAt = 0;
@@ -27,16 +25,13 @@ function textLength(): number {
 }
 
 async function recentlySuggested(): Promise<boolean> {
-  return new Promise(resolve => {
-    chrome.storage.local.get([SHOWN_KEY], (r) => {
-      const last = (r[SHOWN_KEY] as number) || 0;
-      resolve(Date.now() - last < COOLDOWN_MS);
-    });
-  });
+  const r: any = await chrome.runtime.sendMessage({ type: 'ECHO_SUGGESTION_COOLDOWN' }).catch(() => null);
+  return r?.recentlyShown !== false;
 }
 
-function markSuggested() {
-  chrome.storage.local.set({ [SHOWN_KEY]: Date.now() });
+async function markSuggested(): Promise<boolean> {
+  const r: any = await chrome.runtime.sendMessage({ type: 'ECHO_SUGGESTION_COOLDOWN', mark: true }).catch(() => null);
+  return r?.recentlyShown === false;
 }
 
 async function offer(s: Suggestion) {
@@ -46,8 +41,8 @@ async function offer(s: Suggestion) {
   const ae = document.activeElement as HTMLElement | null;
   if (ae && /^(INPUT|TEXTAREA)$/.test(ae.tagName)) return;
 
+  if (!await markSuggested()) return;
   firedThisPage = true;
-  markSuggested();
   window.postMessage({ source: 'echo-observer', type: 'ECHO_LOCAL_SUGGEST', ...s }, '*');
 }
 
