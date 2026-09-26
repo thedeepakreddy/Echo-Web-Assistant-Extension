@@ -7,3 +7,6 @@ dist/
 # OpenClaw probe identity and device tokens (secrets)
 tools/openclaw/.probe-state/
 *.pem
+
+# EchoBench run results (local, per machine)
+tools/echobench/results/

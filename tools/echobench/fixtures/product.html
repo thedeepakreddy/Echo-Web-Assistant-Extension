@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Product — Kettle &amp; Co.</title></head>
+<body><h1 id="name"></h1><p id="price"></p><p id="material"></p><p><a href="shop.html">Back to shop</a></p>
+<script>
+const P = { 'blue-kettle': ['Blue Kettle', '$39.00', 'Enamelled steel'], 'steel-kettle': ['Steel Kettle', '$24.50', 'Brushed stainless steel'],
+  'glass-kettle': ['Glass Kettle', '$52.00', 'Borosilicate glass'], 'speckled-mug': ['Speckled Mug', '$14.00', 'Hand-glazed stoneware'] };
+const p = P[new URLSearchParams(location.search).get('id')] || ['Not found', '', ''];
+document.title = p[0] + ' — Kettle & Co.';
+document.getElementById('name').textContent = p[0];
+document.getElementById('price').textContent = 'Price: ' + p[1];
+document.getElementById('material').textContent = 'Material: ' + p[2];
+</script></body></html>
