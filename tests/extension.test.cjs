@@ -6,6 +6,11 @@ const vm = require('node:vm');
 const ts = require('typescript');
 const { webcrypto } = require('node:crypto');
 
+// The classic ECHO scope with no avatars assigned: what agents/leases.ts
+// reports before any tab is given to an avatar.
+const noLeases = { DEFAULT_SCOPE: 'default', scopeForTab: () => 'default', tabAccessible: () => true,
+  adoptChildTab: async () => {} };
+
 function loadTs(file, globals = {}, requireStub = () => ({})) {
   const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
@@ -82,7 +87,7 @@ test('action approval cannot be granted from another tab', async () => {
     runtime: { sendMessage: async () => {} },
     tabs: { get: async () => ({ url: 'https://example.com' }), sendMessage: async () => {} },
   };
-  const safety = loadTs('src/background/safety.ts', { chrome, crypto: webcrypto, setTimeout, clearTimeout });
+  const safety = loadTs('src/background/safety.ts', { chrome, crypto: webcrypto, setTimeout, clearTimeout }, () => noLeases);
   const answer = safety.requestApproval('click_element', 'Click Send', 11);
   await new Promise(resolve => setTimeout(resolve, 10));
   const prompt = safety.pendingApproval(11);
@@ -150,7 +155,7 @@ test('screenshot never captures a different active tab', async () => {
     get: async () => ({ active: false, windowId: 2 }),
     captureVisibleTab: () => { captured = true; },
   } };
-  const tool = loadTs('src/background/tools.ts', { chrome }, () => ({ currentTaskEpoch: () => 0, agentScope: () => null }));
+  const tool = loadTs('src/background/tools.ts', { chrome }, () => ({ ...noLeases, currentTaskEpoch: () => 0, agentScope: () => null }));
   await assert.rejects(tool.executeTool('screenshot', {}, 7), /Switch to the requested tab/);
   assert.equal(captured, false);
 });
@@ -521,7 +526,7 @@ test('@ mentioned tabs are fenced and marked as untrusted data', () => {
 
 test('isolated browsing confines tools to the private window and HTTPS', async () => {
   const chrome = { tabs: { get: async id => ({ windowId: id === 5 ? 9 : 1 }) } };
-  const iso = loadTs('src/background/isolation.ts', { chrome });
+  const iso = loadTs('src/background/isolation.ts', { chrome }, () => noLeases);
   assert.equal(await iso.tabInScope(3), true, 'no scope: everything allowed');
   iso.setAgentScope({ windowId: 9 });
   assert.equal(await iso.tabInScope(5), true);
@@ -535,7 +540,7 @@ test('isolated browsing confines tools to the private window and HTTPS', async (
   let queried;
   const tools = loadTs('src/background/tools.ts', { chrome: { runtime: {}, tabs: {
     query: (q, cb) => { queried = q; cb([{ id: 5, title: 'Private', url: 'https://x.test', active: true }]); },
-  } } }, () => ({ currentTaskEpoch: () => 0, agentScope: () => ({ windowId: 9 }), assertInScope: async () => {} }));
+  } } }, () => ({ ...noLeases, currentTaskEpoch: () => 0, agentScope: () => ({ windowId: 9 }), assertInScope: async () => {} }));
   const listed = await tools.executeTool('list_tabs', {}, 5);
   assert.equal(json(queried), json({ windowId: 9 }));
   assert.equal(listed.tabs.length, 1);

@@ -2,6 +2,11 @@
 // bus.ts). Saved chats live in local storage; a temporary chat lives only in
 // session storage, so it disappears when the browser closes and never shows up
 // in history.
+//
+// An avatar working in its own tab keeps its own thread instead, in session
+// storage: it lasts as long as the tab assignment it belongs to.
+
+import { DEFAULT_SCOPE } from './agents/leases';
 
 export interface Source { title: string; url: string }
 
@@ -12,6 +17,8 @@ export interface ChatEntry {
   tier?: number;
   sources?: Source[];
   searchHtml?: string;   // Google Search suggestions widget (Gemini grounding)
+  /** The scope that said or received it: an avatar id, or 'default'. */
+  agent?: string;
 }
 
 export interface Chat { id: string; title: string; created: number; updated: number; messages: ChatEntry[] }
@@ -21,6 +28,7 @@ export interface ChatState { activeId: string | null; temporary: boolean; title:
 const CHATS = 'echo_chats';
 const ACTIVE = 'echo_active_chat';
 const TEMP = 'echo_temp_chat';          // session storage: { messages }
+const THREADS = 'echo_agent_threads';   // session storage: { [agent]: ChatEntry[] }
 const MAX_CHATS = 100;
 const MAX_MESSAGES = 200;
 
@@ -91,6 +99,7 @@ export function chatState(): Promise<ChatState> {
 
 /** Append a message to whatever chat is active. Never throws into callers. */
 export function appendEntry(entry: ChatEntry): void {
+  if (entry.agent && entry.agent !== DEFAULT_SCOPE) { appendToThread(entry.agent, entry); return; }
   const gen = generation;
   serial(async () => {
     if (gen !== generation) return;   // a new chat started after this was sent
@@ -173,4 +182,31 @@ export function deleteAllChats(): Promise<void> {
 
 export function exportChats(): Promise<Chat[]> {
   return serial(async () => Object.values(await loadChats()));
+}
+
+// --- avatar threads -----------------------------------------------------------
+
+async function loadThreads(): Promise<Record<string, ChatEntry[]>> {
+  const r = await chrome.storage.session.get([THREADS]);
+  return (r[THREADS] || {}) as Record<string, ChatEntry[]>;
+}
+
+function appendToThread(agent: string, entry: ChatEntry): void {
+  serial(async () => {
+    const threads = await loadThreads();
+    threads[agent] = [...(threads[agent] || []), { ...entry, ts: Date.now() }].slice(-MAX_MESSAGES);
+    await chrome.storage.session.set({ [THREADS]: threads });
+  }).catch(error => console.warn('[ECHO] Avatar thread save failed:', error));
+}
+
+export function agentThread(agent: string): Promise<ChatEntry[]> {
+  return serial(async () => (await loadThreads())[agent] || []);
+}
+
+export function clearAgentThread(agent: string): Promise<void> {
+  return serial(async () => {
+    const threads = await loadThreads();
+    delete threads[agent];
+    await chrome.storage.session.set({ [THREADS]: threads });
+  });
 }

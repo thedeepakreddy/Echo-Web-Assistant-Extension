@@ -17,8 +17,9 @@ import {
 import { searchKB, recentPages, pagesToday, kbSize } from './knowledge-base';
 import { allHighlights, highlightsForUrl, exportHighlightsMarkdown, searchHighlights } from './highlights';
 import { cacheStats, cacheClear } from './response-cache';
-import { abortCurrentWork, clearCloudConversation } from './brain';
+import { abortCurrentWork, forgetCloudConversationAfterReply } from './brain';
 import { cancelTask } from './safety';
+import { scopeForTab } from './agents/leases';
 import { searchAvailable } from './web-search';
 
 export interface LocalResult {
@@ -109,8 +110,9 @@ rule(/^(?:help|what can you do|what do you do|show me (?:your )?(?:features|capa
   ].join('\n'));
 
 // --- abort ---
+// Stops only the work of whoever owns this tab: that avatar, or the classic ECHO.
 rule(/^(stop|cancel|abort|nevermind|never mind|quit|halt)\b[\s!.]*$/i,
-  async () => { abortCurrentWork(); cancelTask(); return "Stopped."; });
+  async (_m, ctx) => { const scope = scopeForTab(ctx.tabId); abortCurrentWork(scope); cancelTask(scope); return "Stopped."; });
 
 // --- memory ---
 rule(/\b(remember|note|save|store)\b.{0,20}?\b(that\s+)?my\s+([\w\s]{2,30}?)\s+(?:is|are|=)\s+(.+)$/i,
@@ -153,7 +155,8 @@ rule(/\b(forget|delete|remove)\b.{0,15}\bmy\s+([\w\s]{2,30}?)\s*$/i,
     delete mem[key];
     await store.set({ echo_memory: mem });
     await cacheClear();
-    clearCloudConversation();
+    // Memories are shared by every avatar, so every conversation forgets.
+    forgetCloudConversationAfterReply();
     return `Forgotten — I no longer have your ${m[2].trim()}.`;
   });
 

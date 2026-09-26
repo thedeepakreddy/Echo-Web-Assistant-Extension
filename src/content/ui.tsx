@@ -240,8 +240,10 @@ export function EchoUI() {
         // Citation markers like [1] are for reading in the side panel, not for speech.
         const plain = String(message.text || '').replace(/\[\d+\]/g, '');
         showLog(plain);
+        // Several avatars can work at once; only the tab in front speaks aloud.
+        if (document.visibilityState !== 'visible') { setStatus('idle'); return; }
         setStatus('speaking');
-        
+
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(plain);
         utterance.lang = speechLanguageRef.current;

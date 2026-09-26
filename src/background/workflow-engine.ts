@@ -222,7 +222,8 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
   if ((wf.startUrl && !isSafeWorkflowUrl(wf.startUrl)) || wf.steps.some(step => step.type === 'navigate' && !isSafeWorkflowUrl(step.url || '')))
     return { ok: false, done: 0, total: wf.steps.length, message: 'This saved workflow contains a private or token URL and cannot be replayed. Please record it again.' };
   let done = 0;
-  const epoch = currentTaskEpoch();
+  // Only this tab's scope can stop the run; another avatar's stop leaves it alone.
+  const epoch = currentTaskEpoch(tabId);
 
   const count = (t: WorkflowStep['type']) => wf.steps.filter(step => step.type === t).length;
   const parts = [`${count('click')} clicks`, `${count('type')} typed fields`, `${count('select')} dropdown choices`, `${count('navigate')} page loads`];
@@ -242,7 +243,7 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
       await logAction('workflow_run', summary, 'denied');
       return { ok: false, done, total: wf.steps.length, message: 'Workflow run was not approved.' };
     }
-    if (currentTaskEpoch() !== epoch) return { ok: false, done, total: wf.steps.length, message: 'Workflow stopped by user.' };
+    if (currentTaskEpoch(tabId) !== epoch) return { ok: false, done, total: wf.steps.length, message: 'Workflow stopped by user.' };
   }
   await logAction('workflow_run', summary, risky ? 'approved' : 'done');
 
@@ -256,7 +257,7 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
   }
 
   for (const step of wf.steps) {
-    if (currentTaskEpoch() !== epoch) return { ok: false, done, total: wf.steps.length, message: 'Workflow stopped by user.' };
+    if (currentTaskEpoch(tabId) !== epoch) return { ok: false, done, total: wf.steps.length, message: 'Workflow stopped by user.' };
     try {
       if (step.type === 'navigate' && step.url) {
         const nextUrl = safeNavigationUrl(step.url);
@@ -286,7 +287,7 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
       // choosing a country), so give the page two short chances to catch up.
       for (let retry = 0; !res?.success && retry < 2; retry++) {
         await sleep(700);
-        if (currentTaskEpoch() !== epoch) return { ok: false, done, total: wf.steps.length, message: 'Workflow stopped by user.' };
+        if (currentTaskEpoch(tabId) !== epoch) return { ok: false, done, total: wf.steps.length, message: 'Workflow stopped by user.' };
         res = await chrome.tabs.sendMessage(tabId, message);
       }
       if (!res?.success) {

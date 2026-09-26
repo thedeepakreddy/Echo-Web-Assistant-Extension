@@ -1,57 +1,93 @@
-// Minimal durable task marker. If Chrome terminates the MV3 worker mid-run,
-// the next worker reports an interruption instead of leaving the UI thinking.
+// Durable task markers, one per running task. Avatars working in their own
+// tabs each have a task, so several can run at once. If Chrome terminates the
+// MV3 worker mid-run, the next worker reports each interruption instead of
+// leaving the UI thinking.
 
-interface ActiveTask { id: string; tabId?: number; startedAt: number }
+import { DEFAULT_SCOPE } from './agents/leases';
 
-let activeTask: ActiveTask | null = null;
+export interface ActiveTask { id: string; scope: string; tabId?: number; startedAt: number }
+
+const KEY = 'echo_active_tasks';
+const LEGACY_KEY = 'echo_active_task';
+
+const active = new Map<string, ActiveTask>();
+let writes: Promise<unknown> = Promise.resolve();
 
 // Chrome stops an idle MV3 worker after ~30 s without extension events, even
 // while it awaits a slow model reply, and the task is lost. Any extension API
 // call resets that timer, so a cheap one every 20 s keeps the worker alive for
-// exactly as long as a task is running.
+// exactly as long as any task is running.
 const KEEPALIVE_MS = 20_000;
 let keepAlive: ReturnType<typeof setInterval> | null = null;
-function holdWorker(on: boolean) {
+function holdWorker() {
+  const on = active.size > 0;
   if (on && !keepAlive) keepAlive = setInterval(() => { chrome.runtime.getPlatformInfo().catch(() => {}); }, KEEPALIVE_MS);
   if (!on && keepAlive) { clearInterval(keepAlive); keepAlive = null; }
 }
 
-export async function recoverInterruptedTask(): Promise<ActiveTask | null> {
-  const r = await chrome.storage.session.get(['echo_active_task']);
-  const interrupted = r.echo_active_task as ActiveTask | undefined;
-  if (!interrupted) return null;
-  await chrome.storage.session.remove('echo_active_task');
-  return interrupted;
+function persist(): Promise<void> {
+  const snapshot = Object.fromEntries(active);
+  const write = writes.then(() => chrome.storage.session.set({ [KEY]: snapshot }));
+  writes = write.catch(() => {});
+  return write;
 }
 
-export async function beginTask(tabId?: number): Promise<string> {
-  const task = { id: crypto.randomUUID(), tabId, startedAt: Date.now() };
-  activeTask = task;
-  holdWorker(true);
-  await chrome.storage.session.set({ echo_active_task: task });
-  chrome.runtime.sendMessage({ type: 'ECHO_TASK_STATUS', active: true, startedAt: task.startedAt }).catch(() => {});
+function announce(scope: string) {
+  const running = [...active.values()].filter(t => t.scope === scope);
+  chrome.runtime.sendMessage({ type: 'ECHO_TASK_STATUS', agent: scope, active: running.length > 0,
+    startedAt: running[0]?.startedAt }).catch(() => {});
+}
+
+/** Tasks a previous worker was running when it stopped. Clears the markers. */
+export async function recoverInterruptedTasks(): Promise<ActiveTask[]> {
+  const r = await chrome.storage.session.get([KEY, LEGACY_KEY]);
+  const found = Object.values((r[KEY] || {}) as Record<string, ActiveTask>);
+  const legacy = r[LEGACY_KEY] as Omit<ActiveTask, 'scope'> | undefined;
+  if (legacy) found.push({ ...legacy, scope: DEFAULT_SCOPE });
+  await chrome.storage.session.remove([KEY, LEGACY_KEY]);
+  return found.filter(t => t && typeof t.id === 'string');
+}
+
+export async function beginTask(tabId?: number, scope: string = DEFAULT_SCOPE): Promise<string> {
+  const task: ActiveTask = { id: crypto.randomUUID(), scope, tabId, startedAt: Date.now() };
+  active.set(task.id, task);
+  holdWorker();
+  await persist();
+  announce(scope);
   return task.id;
 }
 
+/** True when the task was still running (not already stopped by the user). */
 export async function finishTask(id: string): Promise<boolean> {
-  if (activeTask?.id !== id) return false;
-  activeTask = null;
-  holdWorker(false);
-  const r = await chrome.storage.session.get(['echo_active_task']);
-  if ((r.echo_active_task as ActiveTask | undefined)?.id === id) await chrome.storage.session.remove('echo_active_task');
-  chrome.runtime.sendMessage({ type: 'ECHO_TASK_STATUS', active: false }).catch(() => {});
+  const task = active.get(id);
+  if (!task) return false;
+  active.delete(id);
+  holdWorker();
+  await persist();
+  announce(task.scope);
   return true;
 }
 
-export async function cancelActiveTask(): Promise<void> {
-  activeTask = null;
-  holdWorker(false);
-  await chrome.storage.session.remove('echo_active_task');
-  chrome.runtime.sendMessage({ type: 'ECHO_TASK_STATUS', active: false }).catch(() => {});
+/** Stop tracking one scope's tasks, or every task when no scope is given. */
+export async function cancelActiveTask(scope?: string): Promise<void> {
+  const scopes = new Set<string>();
+  for (const [id, task] of active) {
+    if (scope && task.scope !== scope) continue;
+    active.delete(id);
+    scopes.add(task.scope);
+  }
+  if (scope) scopes.add(scope);
+  holdWorker();
+  await persist();
+  scopes.forEach(announce);
 }
 
-export async function taskStatus(): Promise<{ active: boolean; startedAt?: number }> {
-  const r = await chrome.storage.session.get(['echo_active_task']);
-  const task = r.echo_active_task as ActiveTask | undefined;
-  return { active: !!task, startedAt: task?.startedAt };
+export async function taskStatus(scope?: string): Promise<{ active: boolean; startedAt?: number }> {
+  const running = [...active.values()].filter(t => !scope || t.scope === scope);
+  return { active: running.length > 0, startedAt: running[0]?.startedAt };
+}
+
+/** Every scope that has a task running right now. */
+export function runningScopes(): string[] {
+  return [...new Set([...active.values()].map(t => t.scope))];
 }

@@ -1,5 +1,8 @@
 import { executeTool } from './tools';
-import { processUserInput, abortCurrentWork, clearCloudConversation, seedCloudConversation } from './brain';
+import {
+  processUserInput, abortCurrentWork, clearCloudConversation, clearAllConversations, seedCloudConversation,
+  forgetCloudConversationAfterReply,
+} from './brain';
 import { routeUserInput, ingestPage, getSettings, setSettings, routerReport, domainAllowed, sameSite, cloudReady, answerFromTabsOnDevice } from './smart-router';
 import { saveHighlight, highlightsForUrl, allHighlights, clearHighlights, forgetHighlightsForHost } from './highlights';
 import { runWatcherCheck, rehydrateWatchers, WATCH_ALARM_PREFIX, listWatchers } from './page-watcher';
@@ -11,8 +14,11 @@ import { cacheClear } from './response-cache';
 import { runDoctor } from './doctor';
 import { idbGetAll, STORE_CACHE } from './db';
 import { appendRecordedStep, resumeRecordingForTab, recordNavigation, cancelRecording } from './workflow-engine';
-import { beginTask, finishTask, recoverInterruptedTask, cancelActiveTask, taskStatus } from './task-state';
-import { chatState, newChat, openChat, listChats, deleteChat, deleteAllChats, exportChats, isTemporaryChat } from './chats';
+import { beginTask, finishTask, recoverInterruptedTasks, cancelActiveTask, taskStatus, runningScopes } from './task-state';
+import {
+  chatState, newChat, openChat, listChats, deleteChat, deleteAllChats, exportChats, isTemporaryChat,
+  agentThread, clearAgentThread,
+} from './chats';
 import { listSkills, saveSkill, deleteSkill, resetSkills, expandSkill } from './skills';
 import { setMemory, deleteMemory, clearMemories, getProfile } from './personalization';
 import {
@@ -22,6 +28,10 @@ import { createWriterMenus, runWriter, WRITER_MENU_PREFIX } from './writer';
 import { readMentionedTabs, withTabContext } from './tab-context';
 import { resolveAppearance } from '../characters';
 import { startOpenClaw } from './openclaw';
+import {
+  DEFAULT_SCOPE, leasesReady, leaseFor, leaseForTab, listLeases, scopeForTab, isAgentId,
+  assignLease, releaseLease, releaseAllLeases, forgetTab, onLeaseChange,
+} from './agents/leases';
 
 console.log('ECHO Background Service Worker initialized.');
 
@@ -43,6 +53,7 @@ const TRUSTED_ONLY = [
   'ECHO_CHAT_OPEN', 'ECHO_CHAT_DELETE', 'ECHO_CHAT_DELETE_ALL', 'ECHO_SKILLS_LIST', 'ECHO_SKILL_SAVE',
   'ECHO_SKILL_DELETE', 'ECHO_SKILLS_RESET', 'ECHO_ISOLATION_STATUS', 'ECHO_ISOLATION_CLOSE',
   'ECHO_OPEN_EXTENSION_DETAILS', 'ECHO_CLEAR_CONVERSATION',
+  'ECHO_AGENT_LIST', 'ECHO_AGENT_ASSIGN', 'ECHO_AGENT_RELEASE', 'ECHO_AGENT_THREAD',
 ];
 const fromApprovalFrame = (sender: chrome.runtime.MessageSender) =>
   String(sender.url || '').startsWith(chrome.runtime.getURL('approval.html'));
@@ -59,27 +70,67 @@ const wakeStateReady = chrome.storage.session.get(['isEchoAwake'])
   .then(r => { isEchoAwake = r.isEchoAwake === true; })
   .catch(() => {});
 
-const recoveryReady = recoverInterruptedTask().then(interrupted => {
-  if (!interrupted) return;
+// Each task a stopped worker left behind is reported in its own tab's thread.
+const recoveryReady = Promise.all([recoverInterruptedTasks(), leasesReady]).then(([interrupted]) => {
   const text = 'The previous task was interrupted when the browser background restarted. Please retry it.';
-  say(interrupted.tabId, text, 0);
-  setState(interrupted.tabId, 'Idle');
+  for (const task of interrupted) {
+    say(task.tabId, text, 0);
+    setState(task.tabId, 'Idle');
+  }
 }).catch(() => {});
 const speechTabs = new Map<string, number>();
 
 /** How ECHO appears on pages: a character id (see src/characters) or the reactor orb. */
 const avatarStyle = resolveAppearance;
 
+/** The avatar a tab shows: the one assigned to it, else the user's chosen look. */
+const avatarForTab = (tabId: number | undefined, saved: unknown) =>
+  leaseForTab(tabId)?.agent ?? avatarStyle(saved);
+
+async function sendPrefs(tabIds?: number[]) {
+  const prefs = await chrome.storage.local.get(['echo_handsfree', 'echo_speech_language', 'echo_avatar']);
+  const ids = tabIds ?? (await chrome.tabs.query({})).map(t => t.id).filter((id): id is number => id != null);
+  for (const id of ids) {
+    chrome.tabs.sendMessage(id, { type: 'ECHO_PREFS_UPDATED',
+      handsfree: !!prefs.echo_handsfree, language: String(prefs.echo_speech_language || 'en-US'),
+      avatar: avatarForTab(id, prefs.echo_avatar) }).catch(() => {});
+  }
+}
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !['echo_handsfree', 'echo_speech_language', 'echo_avatar'].some(k => k in changes)) return;
-  chrome.storage.local.get(['echo_handsfree', 'echo_speech_language', 'echo_avatar']).then(prefs => {
-    chrome.tabs.query({}).then(tabs => tabs.forEach(tab => {
-      if (tab.id != null) chrome.tabs.sendMessage(tab.id, { type: 'ECHO_PREFS_UPDATED',
-        handsfree: !!prefs.echo_handsfree, language: String(prefs.echo_speech_language || 'en-US'),
-        avatar: avatarStyle(prefs.echo_avatar) }).catch(() => {});
-    })).catch(() => {});
-  }).catch(() => {});
+  sendPrefs().catch(() => {});
 });
+
+// --- avatars on tabs -----------------------------------------------------------
+
+/** Stop everything one scope is doing: model calls, tool actions, approvals, task markers. */
+function stopScope(scope: string) {
+  abortCurrentWork(scope);
+  cancelTask(scope);
+  cancelActiveTask(scope).catch(() => {});
+}
+
+async function agentList() {
+  const scopes = runningScopes();
+  return Promise.all(listLeases().map(async lease => {
+    const tab = await chrome.tabs.get(lease.tabId).catch(() => null);
+    return { agent: lease.agent, tabId: lease.tabId, children: lease.children, since: lease.since,
+      title: tab?.title || '', url: tab?.url || '', working: scopes.includes(lease.agent) };
+  }));
+}
+
+onLeaseChange(({ agent, lease, previous }) => {
+  // An avatar that loses its tab (released, reassigned, or the tab closed) stops working there.
+  if (previous && previous.tabId !== lease?.tabId) stopScope(agent);
+  const tabs = [lease?.tabId, previous?.tabId].filter((id): id is number => id != null);
+  sendPrefs(tabs).catch(() => {});
+  if (previous?.tabId != null && previous.tabId !== lease?.tabId) setState(previous.tabId, 'Idle');
+  agentList().then(agents => chrome.runtime.sendMessage({ type: 'ECHO_AGENTS_CHANGED', agents }).catch(() => {}))
+    .catch(() => {});
+});
+
+chrome.tabs.onRemoved.addListener(tabId => { forgetTab(tabId).catch(() => {}); });
 
 /** Which site a privacy request is about: a typed host, a URL, or the active tab. */
 async function targetSite(message: any): Promise<{ host: string; url: string }> {
@@ -107,6 +158,13 @@ interface RequestOptions {
   webSearch?: boolean;
   /** Run the task in the private ECHO window. */
   isolated?: boolean;
+  /** An avatar the side panel addressed; it works in the tab assigned to it. */
+  agent?: string;
+}
+
+/** Which scope handles a request: the avatar addressed, else the owner of the sender tab. */
+function requestScope(senderTabId: number | undefined, agent?: string): string {
+  return agent && agent !== DEFAULT_SCOPE ? agent : scopeForTab(senderTabId);
 }
 
 const INCOGNITO_HELP = 'Private agent browsing needs ECHO to be allowed in Incognito. '
@@ -114,16 +172,27 @@ const INCOGNITO_HELP = 'Private agent browsing needs ECHO to be allowed in Incog
 
 async function runRequest(text: string, tabId?: number, opts: RequestOptions = {}) {
   await recoveryReady;
-  const id = await beginTask(tabId);
+  // An avatar addressed from the side panel works in its own tab.
+  if (opts.agent && opts.agent !== DEFAULT_SCOPE) {
+    const lease = leaseFor(opts.agent);
+    if (!lease) { say(tabId, 'That avatar has no tab yet. Assign it to a tab first.', 0); return; }
+    tabId = lease.tabId;
+  }
+  const scope = scopeForTab(tabId);
+  if (opts.isolated && scope !== DEFAULT_SCOPE) {
+    say(tabId, 'Private-window tasks run in the main ECHO thread, not in an avatar\'s tab.', 0);
+    return;
+  }
+  const id = await beginTask(tabId, scope);
   try {
     // "/shortcut extra" runs a saved skill; the chat shows what was typed.
     let prompt = text;
     const skill = await expandSkill(text);
-    if (skill?.kind === 'unknown') { echoUser(text); say(tabId, skill.message, 0); return; }
+    if (skill?.kind === 'unknown') { echoUser(text, tabId); say(tabId, skill.message, 0); return; }
     if (skill?.kind === 'skill') prompt = skill.prompt;
 
     if (opts.isolated) {
-      echoUser(`Private window · ${text}`);
+      echoUser(`Private window · ${text}`, tabId);
       if (!await isolationAllowed()) {
         say(tabId, INCOGNITO_HELP, 0);
         chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` }).catch(() => {});
@@ -141,7 +210,7 @@ async function runRequest(text: string, tabId?: number, opts: RequestOptions = {
 
     if (opts.tabs?.length) {
       const tabs = await readMentionedTabs(opts.tabs);
-      echoUser(tabs.length ? `${text}\nAttached: ${tabs.map(t => t.title).join(' · ')}` : text);
+      echoUser(tabs.length ? `${text}\nAttached: ${tabs.map(t => t.title).join(' · ')}` : text, tabId);
       // Every request reaches every brain: without a cloud model, attached
       // tabs are answered on-device rather than failing.
       if (tabs.length && !await cloudReady()) { await answerFromTabsOnDevice(prompt, tabs, tabId); return; }
@@ -150,7 +219,7 @@ async function runRequest(text: string, tabId?: number, opts: RequestOptions = {
     }
 
     if (opts.cloudOnly) {
-      echoUser(text);
+      echoUser(text, tabId);
       await processUserInput(prompt, tabId, { skipEcho: true, webSearch: opts.webSearch });
     } else {
       await routeUserInput(prompt, tabId, { display: text, webSearch: opts.webSearch });
@@ -171,7 +240,8 @@ async function broadcastChatState(state: Awaited<ReturnType<typeof chatState>>) 
 /** Memories feed prompts and cached answers; forget both when they change. */
 async function memoryChanged() {
   await cacheClear();
-  clearCloudConversation();
+  // Every avatar's conversation may hold the old memory; replies in progress finish first.
+  forgetCloudConversationAfterReply();
 }
 
 const broadcastWakeState = async () => {
@@ -313,9 +383,12 @@ chrome.omnibox?.onInputEntered.addListener(text => {
     await broadcastWakeState();
   });
   (async () => {
+    await leasesReady;
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    cancelTask();
-    abortCurrentWork();
+    // A new request replaces the previous one in the same scope only.
+    const scope = scopeForTab(tab?.id);
+    abortCurrentWork(scope);
+    cancelTask(scope);
     await runRequest(query, tab?.id);
   })().catch(error => console.error('[ECHO] Address bar request failed:', error));
 });
@@ -380,13 +453,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const [settings, saved] = await Promise.all([
         getSettings(), chrome.storage.local.get(['echo_handsfree', 'echo_speech_language', 'echo_position', 'echo_avatar']),
       ]);
+      await leasesReady;   // the tab's avatar, if one is assigned
       let siteAllowed = false;
       try { siteAllowed = domainAllowed(new URL(sender.tab?.url || '').hostname, settings.allowedDomains); }
       catch { /* no page context */ }
       return { success: true, autoIndex: settings.autoIndex, siteAllowed,
         passiveSuggest: settings.passiveSuggest, handsfree: !!saved.echo_handsfree,
         language: String(saved.echo_speech_language || 'en-US'), position: saved.echo_position,
-        avatar: avatarStyle(saved.echo_avatar) };
+        avatar: avatarForTab(sender.tab?.id, saved.echo_avatar) };
     })().then(sendResponse).catch(error => sendResponse({ success: false, error: error.message }));
     return true;
   }
@@ -440,16 +514,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Every user request now enters through the router, which spends the
   // cheapest tier that can answer it and only reaches the cloud when needed.
   if (message.type === 'USER_INPUT') {
-    cancelTask();
-    abortCurrentWork();
-    // Attachments, private browsing and forced search only come from ECHO's own
-    // pages; the in-page box (which a web page can see) only sends text.
+    // Attachments, private browsing, forced search and addressing an avatar only
+    // come from ECHO's own pages; the in-page box (which a web page can see)
+    // only sends text, and speaks for whoever owns its tab.
     const opts: RequestOptions = trustedPage(sender) ? {
       tabs: Array.isArray(message.tabs) ? message.tabs.map(Number).filter(Number.isInteger) : undefined,
       webSearch: message.webSearch === true,
       isolated: message.isolated === true,
+      agent: isAgentId(message.agent) ? message.agent : undefined,
     } : {};
-    runRequest(String(message.text || ''), sender.tab?.id, opts).catch(error => {
+    (async () => {
+      await leasesReady;
+      // A new request replaces the previous one in the same scope only.
+      const scope = requestScope(sender.tab?.id, opts.agent);
+      abortCurrentWork(scope);
+      cancelTask(scope);
+      await runRequest(String(message.text || ''), sender.tab?.id, opts);
+    })().catch(error => {
       say(sender.tab?.id, `Request could not start: ${error?.message || 'unknown error'}`);
     });
     sendResponse({ success: true });
@@ -458,28 +539,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Escape hatch: force the cloud brain, bypassing tiers 0-2.
   if (message.type === 'USER_INPUT_CLOUD') {
-    cancelTask();
-    abortCurrentWork();
-    runRequest(String(message.text || ''), sender.tab?.id, { cloudOnly: true }).catch(error => {
+    (async () => {
+      await leasesReady;
+      const scope = scopeForTab(sender.tab?.id);
+      abortCurrentWork(scope);
+      cancelTask(scope);
+      await runRequest(String(message.text || ''), sender.tab?.id, { cloudOnly: true });
+    })().catch(error => {
       say(sender.tab?.id, `Request could not start: ${error?.message || 'unknown error'}`);
     });
     sendResponse({ success: true });
     return false;
   }
 
+  // Stop: the page's orb stops whoever owns its tab; the side panel names a scope.
   if (message.type === 'ECHO_ABORT') {
-    abortCurrentWork();
-    cancelTask();
-    cancelActiveTask().catch(() => {});
-    setState(sender.tab?.id, 'Idle');
+    const agent = trustedPage(sender) && (isAgentId(message.agent) || message.agent === DEFAULT_SCOPE) ? message.agent : undefined;
+    leasesReady.then(() => {
+      const scope = requestScope(sender.tab?.id, agent);
+      stopScope(scope);
+      setState(scope === DEFAULT_SCOPE ? sender.tab?.id : leaseFor(scope)?.tabId, 'Idle');
+    }).catch(() => {});
     sendResponse({ success: true });
     return false;
   }
 
   if (message.type === 'ECHO_CLEAR_CONVERSATION') {
-    cancelTask();
-    clearCloudConversation();
-    cancelActiveTask().catch(() => {});
+    cancelTask(DEFAULT_SCOPE);
+    clearCloudConversation(DEFAULT_SCOPE);
+    cancelActiveTask(DEFAULT_SCOPE).catch(() => {});
     Promise.all([clearTranscript(), cacheClear()])
       .then(async () => {
         chrome.runtime.sendMessage({ type: 'ECHO_CONVERSATION_CLEARED' }).catch(() => {});
@@ -518,8 +606,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'ECHO_TASK_STATUS_REQUEST') {
-    taskStatus().then(status => sendResponse({ success: true, ...status }))
+    const scope = typeof message.agent === 'string' ? message.agent : undefined;
+    taskStatus(scope).then(status => sendResponse({ success: true, ...status }))
       .catch(() => sendResponse({ success: false, active: false }));
+    return true;
+  }
+
+  // --- avatars on tabs ----------------------------------------------------------
+
+  if (message.type === 'ECHO_AGENT_LIST') {
+    leasesReady.then(agentList).then(agents => sendResponse({ success: true, agents }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'ECHO_AGENT_ASSIGN') {
+    (async () => {
+      if (!isAgentId(message.agent)) throw new Error('Unknown avatar.');
+      let tabId = Number(message.tabId);
+      if (!Number.isInteger(tabId)) {
+        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (tab?.id == null) throw new Error('No tab to assign.');
+        tabId = tab.id;
+      }
+      // A fresh assignment starts a fresh conversation and thread.
+      clearCloudConversation(message.agent);
+      await clearAgentThread(message.agent);
+      const lease = await assignLease(message.agent, tabId);
+      return { success: true, lease, agents: await agentList() };
+    })().then(sendResponse).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'ECHO_AGENT_RELEASE') {
+    (async () => {
+      if (!isAgentId(message.agent)) throw new Error('Unknown avatar.');
+      await releaseLease(message.agent);
+      return { success: true, agents: await agentList() };
+    })().then(sendResponse).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'ECHO_AGENT_THREAD') {
+    if (!isAgentId(message.agent)) { sendResponse({ success: false, error: 'Unknown avatar.' }); return false; }
+    agentThread(message.agent).then(messages => sendResponse({ success: true, messages }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
   }
 
@@ -654,9 +785,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'ECHO_CHAT_NEW') {
-    cancelTask();
-    clearCloudConversation();
-    cancelActiveTask().catch(() => {});
+    cancelTask(DEFAULT_SCOPE);
+    clearCloudConversation(DEFAULT_SCOPE);
+    cancelActiveTask(DEFAULT_SCOPE).catch(() => {});
     newChat(message.temporary === true)
       .then(async state => { await broadcastChatState(state); sendResponse({ success: true, state }); })
       .catch(error => sendResponse({ success: false, error: error.message }));
@@ -664,9 +795,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'ECHO_CHAT_OPEN') {
-    cancelTask();
-    clearCloudConversation();
-    cancelActiveTask().catch(() => {});
+    cancelTask(DEFAULT_SCOPE);
+    clearCloudConversation(DEFAULT_SCOPE);
+    cancelActiveTask(DEFAULT_SCOPE).catch(() => {});
     openChat(String(message.id || ''))
       .then(async state => {
         seedCloudConversation(state.messages);
@@ -680,7 +811,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'ECHO_CHAT_DELETE') {
     (async () => {
       if (await deleteChat(String(message.id || ''))) {
-        clearCloudConversation();
+        clearCloudConversation(DEFAULT_SCOPE);
         await broadcastChatState(await chatState());
       }
       return { success: true, chats: await listChats() };
@@ -690,8 +821,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'ECHO_CHAT_DELETE_ALL') {
     (async () => {
-      cancelTask();
-      clearCloudConversation();
+      cancelTask(DEFAULT_SCOPE);
+      clearCloudConversation(DEFAULT_SCOPE);
       await deleteAllChats();
       await broadcastChatState(await newChat(await isTemporaryChat()));
       return { success: true };
@@ -762,7 +893,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'ECHO_CLEAR_ALL_DATA') {
     (async () => {
       cancelTask();
-      clearCloudConversation();
+      clearAllConversations();
+      await cancelActiveTask();
+      await releaseAllLeases();
       await cancelRecording();
       await closeIsolatedWindow();
       await Promise.all([clearKB(), cacheClear(), clearHighlights()]);

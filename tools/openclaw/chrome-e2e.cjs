@@ -165,7 +165,7 @@ async function main() {
   check('example.com is open', tabId != null, `tab ${tabId}`);
 
   await evaluateInWorker(cdp, sw.targetId, `Promise.all([
-    chrome.storage.session.set({ echo_openclaw_leases: { analyst: ${tabId} } }),
+    chrome.storage.session.set({ echo_agent_leases: { 'echo-analyst': { agent: 'echo-analyst', tabId: ${tabId}, children: [], leaseId: crypto.randomUUID(), since: Date.now() } } }),
     chrome.storage.local.set({ echo_openclaw: { enabled: true, url: ${JSON.stringify(url)}, sharedToken: ${JSON.stringify(sharedToken())} } }),
   ]).then(() => true)`);
   log('OpenClaw enabled in the extension; tab assigned to Echo (analyst)');

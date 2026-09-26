@@ -10,7 +10,8 @@
     "docs:capture": "npm run build && npm run docs:showcase && node tools/docs/capture-media.mjs",
     "openclaw:probe": "node tools/openclaw/probe.cjs",
     "openclaw:e2e": "npm run build && node tools/openclaw/chrome-e2e.cjs",
-    "openclaw:agent-reconnect": "node tools/openclaw/agent-reconnect.cjs"
+    "openclaw:agent-reconnect": "node tools/openclaw/agent-reconnect.cjs",
+    "e2e:agents": "npm run build && node tools/e2e/multi-agent.cjs"
   },
   "keywords": [],
   "author": "",

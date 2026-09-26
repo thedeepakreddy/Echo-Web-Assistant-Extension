@@ -4,6 +4,8 @@
 // sending a mail or message (see sensitiveAction below). Every action,
 // approved or not, goes into the action log.
 
+import { DEFAULT_SCOPE, scopeForTab } from './agents/leases';
+
 export interface ApprovalPrompt {
   id: string;
   action: string;
@@ -20,10 +22,22 @@ interface PendingApproval {
 
 const pending = new Map<string, PendingApproval>();
 const APPROVAL_TIMEOUT_MS = 45_000;
-let taskEpoch = 0;
 
-export function currentTaskEpoch(): number { return taskEpoch; }
-export function cancelTask(): void { taskEpoch++; denyPendingApprovals(); }
+// Each scope (the classic ECHO, or an avatar holding a tab) has its own task
+// counter. Stopping one bumps only its counter, so an action another avatar
+// is about to take goes ahead. The scope comes from the tab being acted on.
+const epochs = new Map<string, number>();
+
+export function currentTaskEpoch(tabId?: number | null): number {
+  return epochs.get(scopeForTab(tabId)) || 0;
+}
+
+/** Stop one scope's work in progress, or every scope's when none is given. */
+export function cancelTask(scope?: string): void {
+  const scopes = scope ? [scope] : [DEFAULT_SCOPE, ...epochs.keys()];
+  for (const s of new Set(scopes)) epochs.set(s, (epochs.get(s) || 0) + 1);
+  denyPendingApprovals(scope);
+}
 export function pendingApproval(tabId?: number): ApprovalPrompt | null {
   return [...pending.values()].map(item => item.prompt)
     .find(prompt => tabId == null || prompt.tabId === tabId) || null;
@@ -41,10 +55,13 @@ function broadcast(prompt: ApprovalPrompt | { id: string; type: 'ECHO_APPROVAL_C
 }
 
 export async function requestApproval(action: string, detail: string, tabId?: number): Promise<boolean> {
+  const epoch = currentTaskEpoch(tabId);
   let site = 'the current page';
   if (tabId != null) {
     try { site = new URL((await chrome.tabs.get(tabId)).url || '').hostname || site; } catch { /* no tab */ }
   }
+  // Stopped while looking up the site: never show a prompt for a stopped task.
+  if (currentTaskEpoch(tabId) !== epoch) return false;
   const prompt: ApprovalPrompt = {
     id: crypto.randomUUID(), action, detail: detail.slice(0, 180), site, tabId,
   };
@@ -69,8 +86,11 @@ export function settleApproval(id: string, approved: boolean, senderTabId?: numb
   return true;
 }
 
-export function denyPendingApprovals(): void {
-  for (const id of [...pending.keys()]) settleApproval(id, false);
+/** Deny waiting approvals for one scope's tabs, or all of them. */
+export function denyPendingApprovals(scope?: string): void {
+  for (const [id, item] of [...pending.entries()]) {
+    if (!scope || scopeForTab(item.prompt.tabId) === scope) settleApproval(id, false);
+  }
 }
 
 export async function logAction(action: string, detail: string, status: 'approved' | 'denied' | 'done' | 'failed'): Promise<void> {
