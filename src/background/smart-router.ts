@@ -100,7 +100,8 @@ async function pageText(tabId?: number): Promise<{ text: string; title: string; 
     if (!raw || raw.length < 150) return null;
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     const title = (raw.match(/^TITLE:\s*(.+)$/m)?.[1] || tab?.title || '').trim();
-    return { text: raw.replace(/^TITLE:.*$/m, '').trim(), title, url: tab?.url || '' };
+    // The reader's header lines (TITLE, TEXT range, NEXT_OFFSET) are not page text.
+    return { text: raw.replace(/^(TITLE|TEXT|NEXT_OFFSET):.*$/gm, '').trim(), title, url: tab?.url || '' };
   } catch {
     return null;
   }

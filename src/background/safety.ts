@@ -22,6 +22,8 @@ interface PendingApproval {
 
 const pending = new Map<string, PendingApproval>();
 const APPROVAL_TIMEOUT_MS = 45_000;
+/** Less time than this and the user could not realistically answer. */
+export const MIN_APPROVAL_MS = 5_000;
 
 // Each scope (the classic ECHO, or an avatar holding a tab) has its own task
 // counter. Stopping one bumps only its counter, so an action another avatar
@@ -54,7 +56,14 @@ function broadcast(prompt: ApprovalPrompt | { id: string; type: 'ECHO_APPROVAL_C
   if (tabId != null) chrome.tabs.sendMessage(tabId, message).catch(() => {});
 }
 
-export async function requestApproval(action: string, detail: string, tabId?: number): Promise<boolean> {
+/**
+ * Ask the user to allow a payment or a send. `timeoutMs` shortens the wait
+ * when the caller has a deadline of its own (an agent's tool call): the prompt
+ * must close before the caller gives up, so a late "Allow" never acts.
+ */
+export async function requestApproval(action: string, detail: string, tabId?: number,
+  timeoutMs: number = APPROVAL_TIMEOUT_MS): Promise<boolean> {
+  if (timeoutMs < MIN_APPROVAL_MS) return false;
   const epoch = currentTaskEpoch(tabId);
   let site = 'the current page';
   if (tabId != null) {
@@ -66,7 +75,7 @@ export async function requestApproval(action: string, detail: string, tabId?: nu
     id: crypto.randomUUID(), action, detail: detail.slice(0, 180), site, tabId,
   };
   return new Promise(resolve => {
-    const timer = setTimeout(() => settleApproval(prompt.id, false), APPROVAL_TIMEOUT_MS);
+    const timer = setTimeout(() => settleApproval(prompt.id, false), Math.min(timeoutMs, APPROVAL_TIMEOUT_MS));
     pending.set(prompt.id, { prompt, resolve, timer });
     broadcast(prompt);
   });

@@ -483,6 +483,8 @@ function Options() {
         <div className="row"><button className="plain destructive" onClick={eraseAllData}>Delete All ECHO Data…</button></div>
       </Group>
 
+      <OpenClawGroup />
+
       <Group title="Private Agent Browsing" footer="Tasks run in a separate private window: no cookies, logins or history from your normal browsing, HTTPS only, and ECHO still asks before paying or sending anything.">
         <Row label="Status">
           <span className="value">{isolation == null ? 'Checking…' : isolation.allowed ? 'Ready' : 'Needs "Allow in Incognito"'}</span>
@@ -526,6 +528,124 @@ function Options() {
         <button className="primary" onClick={saveOptions}>Save</button>
       </div>
     </div>
+  );
+}
+
+// ---- OpenClaw agents ----
+// Self-contained: saves as you go, independent of the page's Save button.
+
+interface GatewayState { kind: string; requestId?: string; code?: string; message?: string; willRetry?: boolean }
+interface OpenClawStatus {
+  enabled: boolean; url: string; hasToken: boolean; node: GatewayState; operator: GatewayState;
+  serverVersion?: string; testedVersion: string; commands: { state: string; requestId?: string }; ready: boolean;
+}
+
+const OC = 'openclaw --profile echo';
+
+// What a gateway error means for the user, in ECHO's words.
+const GATEWAY_ERRORS: Record<string, string> = {
+  AUTH_TOKEN_MISSING: 'needs the gateway token',
+  AUTH_TOKEN_MISMATCH: 'the gateway token is wrong',
+  AUTH_DEVICE_TOKEN_MISMATCH: 'pairing was reset: paste the gateway token again',
+  AUTH_UNAUTHORIZED: 'not authorised: paste the gateway token',
+  CONTROL_UI_ORIGIN_NOT_ALLOWED: 'the gateway does not know this ECHO yet: run the setup script',
+  PROTOCOL_MISMATCH: 'this OpenClaw version is not supported',
+  CLIENT_VERSION_MISMATCH: 'this OpenClaw version is not supported',
+  INSECURE_URL: 'the gateway must be on this computer or use wss://',
+  CLOSED: 'gateway not running', SOCKET: 'gateway not running',
+};
+
+function describeRole(s: GatewayState): string {
+  switch (s.kind) {
+    case 'connected': return 'connected';
+    case 'connecting': return 'connecting…';
+    case 'pairing-required': return 'waiting for approval on the gateway';
+    case 'stopped': return 'off';
+    default: return GATEWAY_ERRORS[s.code || ''] || `error (${s.code || 'unknown'})`;
+  }
+}
+
+function CopyLine({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="row copy-line">
+      <code>{command}</code>
+      <button className="plain" onClick={() => navigator.clipboard.writeText(command).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>
+        {copied ? 'Copied' : 'Copy'}</button>
+    </div>
+  );
+}
+
+function OpenClawGroup() {
+  const [status, setStatus] = useState<OpenClawStatus | null>(null);
+  const [url, setUrl] = useState('');
+  const [token, setToken] = useState('');
+  const [script, setScript] = useState('');
+  const [note, setNote] = useState('');
+
+  const refresh = () => chrome.runtime.sendMessage({ type: 'ECHO_OPENCLAW_STATUS' })
+    .then((r: any) => { if (r?.success) { setStatus(r.status); setUrl(u => u || r.status.url); } })
+    .catch(() => {});
+  useEffect(() => {
+    refresh();
+    const onMessage = (m: any) => { if (m?.type === 'ECHO_OPENCLAW_STATUS_CHANGED') refresh(); };
+    chrome.runtime.onMessage.addListener(onMessage);
+    const timer = setInterval(refresh, 3000);
+    return () => { chrome.runtime.onMessage.removeListener(onMessage); clearInterval(timer); };
+  }, []);
+
+  const save = (patch: Record<string, unknown>) => chrome.runtime.sendMessage({ type: 'ECHO_OPENCLAW_SAVE', ...patch })
+    .then((r: any) => { if (r?.success) { setStatus(r.status); setNote(''); } else setNote(r?.error || 'Could not save.'); })
+    .catch(error => setNote(error?.message || 'Could not save.'));
+
+  const showScript = () => chrome.runtime.sendMessage({ type: 'ECHO_OPENCLAW_SETUP_SCRIPT' })
+    .then((r: any) => { if (r?.success) setScript(r.script); }).catch(() => {});
+
+  const pairing = [status?.operator, status?.node].find(s => s?.kind === 'pairing-required');
+  const needsToken = !!status?.enabled && !status.hasToken && status.operator.kind !== 'connected';
+  const versionNote = status?.serverVersion && status.serverVersion !== status.testedVersion
+    ? `Gateway ${status.serverVersion}; ECHO was tested with ${status.testedVersion}.` : '';
+
+  return (
+    <Group title="OpenClaw Agents" footer={'Each avatar you assign to a tab becomes an OpenClaw agent that works in that tab. Your gateway runs on this computer; ECHO still asks before paying or sending anything.'
+      + (versionNote ? `\n${versionNote}` : '')}>
+      <Toggle id="openclaw-enabled" checked={!!status?.enabled} onChange={v => save({ enabled: v })}
+        label="Use OpenClaw for avatars" hint={status?.ready ? 'Ready: avatars run as OpenClaw agents.' : 'Avatars use ECHO\'s built-in brain until the gateway is ready.'} />
+      {status?.enabled && (<>
+        <Row label="Gateway" htmlFor="openclaw-url">
+          <input id="openclaw-url" value={url} onChange={e => setUrl(e.target.value)} onBlur={() => url !== status.url && save({ url })} />
+        </Row>
+        <Row label="Connection" hint={`Agents: ${describeRole(status.operator)} · Tools: ${describeRole(status.node)}`}>
+          <span className="value">{status.ready ? 'Ready' : 'Not ready'}</span>
+        </Row>
+        {(needsToken || status.hasToken) && (
+          <form className="row inline-form" onSubmit={e => { e.preventDefault(); if (token.trim()) { save({ sharedToken: token }); setToken(''); } }}>
+            <input type="password" value={token} onChange={e => setToken(e.target.value)} aria-label="Gateway token"
+              placeholder={status.hasToken ? 'Saved until pairing finishes, then deleted' : 'Paste the gateway token'} />
+            <button type="submit" className="plain" disabled={!token.trim()}>Save</button>
+          </form>
+        )}
+        {needsToken && <CopyLine command={`${OC} gateway auth-token --show`} />}
+        {pairing?.requestId && (<>
+          <Row label="Approve ECHO on the gateway" hint="Run this in Terminal on this computer." />
+          <CopyLine command={`${OC} devices approve ${pairing.requestId}`} />
+        </>)}
+        {status.node.kind === 'connected' && status.commands.state === 'pending' && (<>
+          <Row label="Approve ECHO's avatar tools" hint="A second approval, for the tools each avatar may use." />
+          <CopyLine command={status.commands.requestId ? `${OC} nodes approve ${status.commands.requestId}` : `${OC} nodes pending`} />
+        </>)}
+        <Row label="Gateway setup" hint="Configures ECHO's gateway profile: its agents, their tools and this extension's id.">
+          <button className="secondary" onClick={showScript}>Show Script</button>
+        </Row>
+        {script && (
+          <div className="row stacked">
+            <textarea className="setup-script" readOnly value={script} rows={8} aria-label="Gateway setup script" />
+            <button className="plain" onClick={() => navigator.clipboard.writeText(script).then(() => setNote('Script copied. Save it as echo-setup.sh and run: bash echo-setup.sh'))}>Copy Script</button>
+          </div>
+        )}
+        {note && <div className="row"><span className="value">{note}</span></div>}
+      </>)}
+    </Group>
   );
 }
 

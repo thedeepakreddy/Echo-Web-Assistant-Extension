@@ -1,4 +1,4 @@
-import { requestApproval, logAction, safeNavigationUrl, currentTaskEpoch, sensitiveAction } from './safety';
+import { requestApproval, logAction, safeNavigationUrl, currentTaskEpoch, sensitiveAction, MIN_APPROVAL_MS } from './safety';
 import { cacheClear } from './response-cache';
 import { agentScope, assertInScope, assertIsolatedUrl } from './isolation';
 import { DEFAULT_SCOPE, adoptChildTab, scopeForTab, tabAccessible } from './agents/leases';
@@ -43,7 +43,15 @@ const DOM_ACTIONS = new Set([
   'render_highlights', 'clear_highlights',
 ]);
 
-export async function executeTool(toolName: string, args: any, tabId?: number): Promise<any> {
+export interface ToolOptions {
+  /** Epoch ms when the caller stops waiting (an agent's tool call). Approvals end before it. */
+  deadline?: number;
+}
+
+/** Leave this long between an approval closing and the caller's deadline. */
+const APPROVAL_DEADLINE_MARGIN_MS = 1_500;
+
+export async function executeTool(toolName: string, args: any, tabId?: number, opts: ToolOptions = {}): Promise<any> {
   // Stop signals and isolation belong to the scope that owns this tab.
   const epoch = currentTaskEpoch(tabId);
   // Isolated browsing: every tab-touching tool stays inside the private window.
@@ -83,7 +91,12 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
         key: String(args?.key ?? ''), submit: args?.submit === true });
       if (kind) {
         const prefix = kind === 'payment' ? 'Payment' : 'Send';
-        const approved = await requestApproval(toolName, `${prefix}: ${approvalDetail}`, tabId);
+        const approvalWindow = opts.deadline ? opts.deadline - Date.now() - APPROVAL_DEADLINE_MARGIN_MS : undefined;
+        if (approvalWindow !== undefined && approvalWindow < MIN_APPROVAL_MS) {
+          await logAction(toolName, detail, 'denied');
+          throw new Error('This needs the user\'s approval and there is not enough time left to ask. Tell the user what you want to do and ask them to confirm in chat, then try again.');
+        }
+        const approved = await requestApproval(toolName, `${prefix}: ${approvalDetail}`, tabId, approvalWindow);
         if (!approved) {
           await logAction(toolName, detail, 'denied');
           throw new Error('Action denied or approval timed out.');
@@ -132,15 +145,17 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
       // Create the tab, wait for it to fully load, then return the NEW tab's id.
       // The brain loops watch for `newTabId` in the result and update their
       // activeTabId so all subsequent DOM actions go to the right tab.
+      // An avatar working in the background opens tabs in the background too:
+      // it must never pull the user away from the tab they are using.
+      const opener = scopeForTab(tabId);
       const newTab = await new Promise<chrome.tabs.Tab>((resolve, reject) => {
-        chrome.tabs.create(scope ? { url, windowId: scope.windowId } : { url }, (tab) => {
+        chrome.tabs.create(scope ? { url, windowId: scope.windowId } : { url, active: opener === DEFAULT_SCOPE }, (tab) => {
           if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
           else resolve(tab);
         });
       });
       // A tab an avatar opens is part of its lease: it may keep working there.
-      const owner = scopeForTab(tabId);
-      if (owner !== DEFAULT_SCOPE && newTab.id != null) await adoptChildTab(owner, newTab.id);
+      if (opener !== DEFAULT_SCOPE && newTab.id != null) await adoptChildTab(opener, newTab.id);
       await waitForTabLoad(newTab.id!);
       return { success: true, newTabId: newTab.id, message: `Opened ${args.url} in a new tab (id: ${newTab.id}). Use read_screen now to see it.` };
     }

@@ -27,7 +27,11 @@ import {
 import { createWriterMenus, runWriter, WRITER_MENU_PREFIX } from './writer';
 import { readMentionedTabs, withTabContext } from './tab-context';
 import { resolveAppearance } from '../characters';
-import { startOpenClaw } from './openclaw';
+import {
+  startOpenClaw, openClawReadyFor, runOnOpenClaw, abortOpenClaw, openClawRunPending, openClawStatus, saveOpenClawSettings,
+} from './openclaw';
+import { setupScript } from './openclaw/setup-script';
+import { handleLocally } from './local-brain';
 import {
   DEFAULT_SCOPE, leasesReady, leaseFor, leaseForTab, listLeases, scopeForTab, isAgentId,
   assignLease, releaseLease, releaseAllLeases, forgetTab, onLeaseChange,
@@ -54,6 +58,7 @@ const TRUSTED_ONLY = [
   'ECHO_SKILL_DELETE', 'ECHO_SKILLS_RESET', 'ECHO_ISOLATION_STATUS', 'ECHO_ISOLATION_CLOSE',
   'ECHO_OPEN_EXTENSION_DETAILS', 'ECHO_CLEAR_CONVERSATION',
   'ECHO_AGENT_LIST', 'ECHO_AGENT_ASSIGN', 'ECHO_AGENT_RELEASE', 'ECHO_AGENT_THREAD',
+  'ECHO_OPENCLAW_STATUS', 'ECHO_OPENCLAW_SAVE', 'ECHO_OPENCLAW_SETUP_SCRIPT',
 ];
 const fromApprovalFrame = (sender: chrome.runtime.MessageSender) =>
   String(sender.url || '').startsWith(chrome.runtime.getURL('approval.html'));
@@ -70,10 +75,13 @@ const wakeStateReady = chrome.storage.session.get(['isEchoAwake'])
   .then(r => { isEchoAwake = r.isEchoAwake === true; })
   .catch(() => {});
 
-// Each task a stopped worker left behind is reported in its own tab's thread.
-const recoveryReady = Promise.all([recoverInterruptedTasks(), leasesReady]).then(([interrupted]) => {
+// Each task a stopped worker left behind is reported in its own tab's thread,
+// except an avatar's OpenClaw run: the gateway kept working, and the reply is
+// delivered once ECHO reconnects.
+const recoveryReady = Promise.all([recoverInterruptedTasks(), leasesReady]).then(async ([interrupted]) => {
   const text = 'The previous task was interrupted when the browser background restarted. Please retry it.';
   for (const task of interrupted) {
+    if (task.scope !== DEFAULT_SCOPE && await openClawRunPending(task.scope)) continue;
     say(task.tabId, text, 0);
     setState(task.tabId, 'Idle');
   }
@@ -104,11 +112,12 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 // --- avatars on tabs -----------------------------------------------------------
 
-/** Stop everything one scope is doing: model calls, tool actions, approvals, task markers. */
+/** Stop everything one scope is doing: model calls, tool actions, approvals, task markers, gateway runs. */
 function stopScope(scope: string) {
   abortCurrentWork(scope);
   cancelTask(scope);
   cancelActiveTask(scope).catch(() => {});
+  if (scope !== DEFAULT_SCOPE) abortOpenClaw(scope);
 }
 
 async function agentList() {
@@ -190,6 +199,17 @@ async function runRequest(text: string, tabId?: number, opts: RequestOptions = {
     const skill = await expandSkill(text);
     if (skill?.kind === 'unknown') { echoUser(text, tabId); say(tabId, skill.message, 0); return; }
     if (skill?.kind === 'skill') prompt = skill.prompt;
+
+    // An avatar runs as its OpenClaw agent when the gateway is connected.
+    // Local skills (stop, workflows, extractors…) still answer first: instant
+    // and free. Without the gateway, the built-in brain answers below.
+    if (scope !== DEFAULT_SCOPE && openClawReadyFor(scope)) {
+      echoUser(opts.tabs?.length ? `${text}\n(with ${opts.tabs.length} attached tab${opts.tabs.length === 1 ? '' : 's'})` : text, tabId);
+      if (await handleLocally(prompt, tabId)) return;
+      const attached = opts.tabs?.length ? await readMentionedTabs(opts.tabs) : [];
+      await runOnOpenClaw(scope, attached.length ? withTabContext(prompt, attached) : prompt);
+      return;
+    }
 
     if (opts.isolated) {
       echoUser(`Private window · ${text}`, tabId);
@@ -610,6 +630,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     taskStatus(scope).then(status => sendResponse({ success: true, ...status }))
       .catch(() => sendResponse({ success: false, active: false }));
     return true;
+  }
+
+  // --- OpenClaw gateway settings ----------------------------------------------------
+
+  if (message.type === 'ECHO_OPENCLAW_STATUS') {
+    openClawStatus().then(status => sendResponse({ success: true, status }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'ECHO_OPENCLAW_SAVE') {
+    const patch: Record<string, unknown> = {};
+    if (typeof message.enabled === 'boolean') patch.enabled = message.enabled;
+    if (typeof message.url === 'string') patch.url = message.url.trim();
+    if (typeof message.sharedToken === 'string') patch.sharedToken = message.sharedToken.trim();
+    saveOpenClawSettings(patch).then(openClawStatus).then(status => sendResponse({ success: true, status }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'ECHO_OPENCLAW_SETUP_SCRIPT') {
+    sendResponse({ success: true, script: setupScript(chrome.runtime.id, chrome.runtime.getManifest().version) });
+    return false;
   }
 
   // --- avatars on tabs ----------------------------------------------------------
