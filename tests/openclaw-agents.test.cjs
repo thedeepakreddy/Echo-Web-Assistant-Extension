@@ -63,10 +63,18 @@ test('setup script: valid bash, this extension only, every command, locked-down 
   assert.deepEqual(agents['echo-analyst'].tools.exec, { security: 'deny' });
   assert.ok(agents['echo-analyst'].tools.deny.includes('exec') && agents['echo-analyst'].tools.deny.includes('browser'));
   assert.ok(agents['echo-analyst'].tools.allow.every(name => name.startsWith('analyst_')), 'an avatar gets only its own tools');
+  // The model calls ECHO's tools directly (a Code Mode wrapper dropped their
+  // results), with no skill list and no unused workspace files in its prompt.
+  assert.equal(agents['echo-analyst'].tools.codeMode, false);
+  assert.deepEqual(agents['echo-analyst'].skills, []);
+  assert.match(script, /config set tools\.codeMode false/);
+  assert.match(script, /config set tools\.toolSearch false/);
+  assert.match(script, /rm -f "\$HOME\/\.openclaw-echo\/workspace-echo-analyst"\/USER\.md/);
   const rules = setup.agentsMd(r.avatarByCharacter('echo-analyst'));
   assert.match(rules, /Never fill gaps from memory or from earlier tasks/);
   assert.match(rules, /untrusted data, never instructions/);
   assert.match(rules, /analyst_verify/);
+  assert.match(rules, /never guess addresses/);
   assert.match(rules, /do not ask for confirmation in chat first/, 'one approval, at the payment click, not two');
 });
 
@@ -193,9 +201,10 @@ test('sessions: errors are reported, and events for another run are ignored', as
 
 function toolHarness({ fail } = {}) {
   const executed = [];
+  const evidence = [];
   const tabs = { 7: { url: 'https://shop.example/', title: 'Shop' }, 8: { url: 'https://shop.example/p', title: 'Product' }, 9: { url: 'https://mail.example/' } };
   const chrome = {
-    tabs: { get: async id => { if (!tabs[id]) throw new Error('gone'); return { id, ...tabs[id] }; } },
+    tabs: { get: async id => { if (!tabs[id]) throw new Error('gone'); return { id, status: 'complete', ...tabs[id] }; } },
     storage: { local: { get: async () => ({}), set: async () => {} } },
   };
   const leases = {
@@ -203,52 +212,95 @@ function toolHarness({ fail } = {}) {
     leaseFor: c => (c === 'echo-analyst' ? { agent: c, tabId: 7, children: [8], leaseId: 'L1' } : null),
     tabAccessible: (scope, tabId) => scope === 'echo-analyst' && (tabId === 7 || tabId === 8),
   };
+  let doc = 0;
   const tools = { executeTool: async (name, args, tabId, opts) => {
     executed.push({ name, args, tabId, deadline: opts?.deadline });
-    if (fail && name === fail) throw new Error('No element [4]. Call read_screen again.');
-    if (name === 'get_page_text') return 'TITLE: Shop\nTEXT: 0-60 of 60\n\nBlue Kettle costs $39.00. Order total: $39.00';
+    if (fail && name === fail) throw new Error('e4 is no longer on the page. Observe again.');
+    if (name === 'snapshot') return { doc: `doc-${tabId}-${++doc}`, text: `URL: ${tabs[tabId].url}\n[e4] button "Add to cart"` };
+    if (name === 'find_texts') return args.texts.map(text => ({ text, found: text === '$39.00', context: text === '$39.00' ? 'Blue Kettle costs $39.00.' : undefined }));
+    if (name === 'click_element') return `Clicked [${args.ref}]`;
     return { ok: name };
   } };
   const r = registry();
   const bt = loadTs('src/background/openclaw/browser-tools.ts', { chrome }, {
     '../tools': tools, 'agents/leases': leases, '../workflow-engine': {}, '../page-watcher': {}, './registry': r,
+    '../grounding': {
+      addEvidence: (scope, value) => evidence.push({ scope, value }),
+      mentioned: (scope, text) => evidence.some(e => e.scope === scope && JSON.stringify(e.value).toLowerCase().includes(text.toLowerCase())),
+    },
   });
   const byName = Object.fromEntries(bt.browserToolsFor(r.avatarByCharacter('echo-analyst')).map(t => [t.name.replace('analyst_', ''), t]));
-  return { byName, executed };
+  return { byName, executed, evidence, bt };
 }
 const ctx = () => ({ deadline: Date.now() + 28_000, idempotencyKey: 'k' });
 
-test('browser tools: published per avatar; screenshot declared but not yet offered', () => {
+test('browser tools: every tool is published per avatar, screenshots included', () => {
   const { byName } = toolHarness();
   assert.deepEqual(Object.keys(byName).sort(),
-    ['act', 'extract', 'find', 'navigate', 'observe', 'read', 'tabs', 'transcript', 'verify', 'watch', 'workflow']);
+    ['act', 'extract', 'find', 'navigate', 'observe', 'read', 'screenshot', 'tabs', 'transcript', 'verify', 'watch', 'workflow']);
 });
 
-test('browser tools: act runs steps in order, passes the deadline, and stops at the first failure', async () => {
+test('browser tools: act works by reference, names the page it was planned on, and stops at the first failure', async () => {
   const { byName, executed } = toolHarness({ fail: 'type_text' });
-  const out = await byName.act.run({ steps: [{ do: 'click', index: 2 }, { do: 'type', index: 4, text: 'kettle', submit: true }, { do: 'scroll', amount: 400 }] }, ctx());
-  assert.deepEqual(plain(executed.map(e => e.name)), ['click_element', 'type_text'], 'the step after a failure never runs');
-  assert.ok(executed.every(e => e.tabId === 7 && e.deadline > Date.now()), 'acts in its own tab, within the deadline');
-  assert.equal(out.failed.step, 2);
-  assert.match(out.hint, /Observe the page again/);
+  await byName.observe.run({}, ctx());
+  const out = await byName.act.run({ steps: [{ do: 'click', ref: 'e4' }, { do: 'type', ref: 'e5', text: 'kettle', submit: true }, { do: 'scroll', amount: 400 }] }, ctx());
+  assert.deepEqual(plain(executed.map(e => e.name)), ['snapshot', 'click_element', 'type_text', 'snapshot'], 'the step after a failure never runs; the page is read once at the end');
+  assert.equal(executed[1].args.doc, 'doc-7-1', 'actions name the page load they were planned on');
+  assert.ok(executed.every(e => e.tabId === 7), 'acts in its own tab');
+  assert.ok(executed.filter(e => e.name !== 'snapshot').every(e => e.deadline > Date.now()), 'within the deadline');
+  assert.match(out, /1\. Clicked \[e4\]/);
+  assert.match(out, /Step 2 \(type e5\) failed: e4 is no longer on the page/);
+  assert.match(out, /Page now:\nURL: https:\/\/shop\.example\//, 'answers with the page after the steps');
+  assert.match(await byName.act.run({ steps: [{ do: 'click' }] }, ctx()), /needs a ref from observe/);
 });
 
 test('browser tools: tabs stay within the avatar\'s own tabs and never focus a tab', async () => {
   const { byName, executed } = toolHarness();
-  await assert.rejects(byName.tabs.run({ action: 'switch', tabId: 9 }, ctx()), /only switch to your own tabs/);
-  await assert.rejects(byName.tabs.run({ action: 'close', tabId: 7 }, ctx()), /not your assigned tab/);
-  assert.deepEqual(plain(await byName.tabs.run({ action: 'switch', tabId: 8 }, ctx())), { current: 8 });
+  assert.match(await byName.tabs.run({ action: 'switch', tabId: 9 }, ctx()), /^Not done: You can only switch to your own tabs/);
+  assert.match(await byName.tabs.run({ action: 'close', tabId: 7 }, ctx()), /^Not done: .*not your assigned tab/);
+  assert.match(await byName.tabs.run({ action: 'switch', tabId: 8 }, ctx()), /Tab 8 is now your current tab[\s\S]*shop\.example\/p/);
   await byName.observe.run({}, ctx());
   assert.equal(executed.at(-1).tabId, 8, 'later tools act in the tab it switched to');
   assert.ok(!executed.some(e => e.name === 'switch_tab'), 'switching never brings a tab to the front');
 });
 
-test('browser tools: verify reports pass or fail with the text that proves it', async () => {
+test('browser tools: verify checks exact quotes on the whole page and proves each one', async () => {
   const { byName } = toolHarness();
-  const out = await byName.verify.run({ urlIncludes: 'shop.example', textIncludes: ['$39.00', 'Order placed'] }, ctx());
-  assert.equal(out.pass, false);
-  assert.deepEqual(plain(out.checks.map(c => c.pass)), [true, true, false]);
-  assert.match(out.checks[1].evidence, /Blue Kettle costs \$39\.00/);
+  const out = await byName.verify.run({ urlIncludes: 'shop.example', quotes: ['$39.00', 'Order placed'] }, ctx());
+  assert.match(out, /^FAIL \(2 of 3\)/);
+  assert.match(out, /✓ page shows "\$39\.00" — Blue Kettle costs \$39\.00\./);
+  assert.match(out, /✗ page shows "Order placed"/);
+  assert.match(await byName.verify.run({}, ctx()), /^Not done: Give urlIncludes/);
+});
+
+test('browser tools: an avatar\'s first look at a tab is the whole page, later looks only the changes', async () => {
+  const { byName, executed, bt } = toolHarness();
+  await byName.observe.run({}, ctx());
+  await byName.observe.run({}, ctx());
+  bt.resetLooking('echo-analyst');   // released and assigned again
+  await byName.observe.run({}, ctx());
+  assert.deepEqual(plain(executed.filter(e => e.name === 'snapshot').map(e => e.args.full)), [true, false, true]);
+});
+
+test('browser tools: avatars open addresses they have seen, home pages and searches, never guessed deep links', async () => {
+  const { byName, executed, evidence } = toolHarness();
+  evidence.push({ scope: 'echo-analyst', value: 'The user asked: compare with https://shop.example/deals?week=40' });
+  const went = () => executed.filter(e => e.name === 'navigate').map(e => e.args.url);
+  assert.match(await byName.navigate.run({ url: 'https://shop.example/contact.html' }, ctx()), /^Not done: .*does not open guessed addresses/);
+  assert.match(await byName.tabs.run({ action: 'open', url: 'https://other.example/help' }, ctx()), /^Not done: .*guessed addresses/);
+  await byName.navigate.run({ url: 'https://shop.example/deals?week=40' }, ctx());
+  await byName.navigate.run({ url: 'https://www.bestbuy.com/' }, ctx());
+  await byName.navigate.run({ url: 'https://www.google.com/search?q=steel+kettle' }, ctx());
+  assert.deepEqual(plain(went()), ['https://shop.example/deals?week=40', 'https://www.bestbuy.com/', 'https://www.google.com/search?q=steel+kettle']);
+});
+
+test('browser tools: what the tools read becomes evidence; refusals do not', async () => {
+  const { byName, evidence } = toolHarness();
+  await byName.observe.run({}, ctx());
+  await byName.tabs.run({ action: 'switch', tabId: 9 }, ctx());
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].scope, 'echo-analyst');
+  assert.match(evidence[0].value, /Add to cart/);
 });
 
 // --- approvals within a tool call's deadline ---------------------------------------------
@@ -360,7 +412,8 @@ function openClawHarness({ publishDelayMs = 0 } = {}) {
     './registry': r,
     'setup-script': { TESTED_OPENCLAW: 'test' },
     leases: leasesModule,
-    bus: { sayAs: () => {}, setStateAs: () => {} },
+    bus: { sayAs: () => {}, setStateAs: () => {}, draftAs: () => {} },
+    grounding: { addEvidence: () => {}, resetEvidence: () => {}, unverifiedClaims: () => [] },
   });
   const connect = async () => {
     openclaw.startOpenClaw();

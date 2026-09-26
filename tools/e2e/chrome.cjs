@@ -63,12 +63,12 @@ async function findTarget(cdp, predicate, timeoutMs = 10_000) {
  * Start Chrome for Testing with ECHO loaded. Returns the CDP client, the
  * extension id, its service-worker target, and a cleanup function.
  */
-async function launchEcho({ chrome = DEFAULT_CHROME, urls = ['about:blank'] } = {}) {
+async function launchEcho({ chrome = DEFAULT_CHROME, urls = ['about:blank'], extensionDir = dist } = {}) {
   const userDir = fs.mkdtempSync(path.join(os.tmpdir(), 'echo-e2e-'));
   const port = 9300 + Math.floor(Math.random() * 500);
   const proc = spawn(chrome, [
     '--headless=new', `--user-data-dir=${userDir}`, `--remote-debugging-port=${port}`,
-    `--load-extension=${dist}`, `--disable-extensions-except=${dist}`,
+    `--load-extension=${extensionDir}`, `--disable-extensions-except=${extensionDir}`,
     // Headless Chrome takes one start URL; the rest open over DevTools below.
     '--no-first-run', '--no-default-browser-check', urls[0] || 'about:blank',
   ], { stdio: 'ignore' });

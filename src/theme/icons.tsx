@@ -26,5 +26,6 @@ export const ICONS = {
   form: svg(<><rect x="5" y="4" width="14" height="17" rx="2" /><path d="M9 4V3h6v1M9 11l2 2 4-4M9 17h6" /></>),
   watch: svg(<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></>),
   tabs: svg(<><rect x="3" y="7" width="14" height="13" rx="2" /><path d="M7 7V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-2" /></>),
+  warning: svg(<><path d="M12 4 2.8 19.5h18.4z" /><path d="M12 10v4.2M12 17.2h.01" /></>),
   avatars: svg(<><circle cx="9" cy="8" r="3.2" /><path d="M3.5 19.5c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5" /><circle cx="16.8" cy="9" r="2.6" /><path d="M16 14.6c2.4.1 4 1.7 4.5 4.4" /></>),
 };

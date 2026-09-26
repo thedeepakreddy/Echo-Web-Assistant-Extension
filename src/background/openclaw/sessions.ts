@@ -15,6 +15,8 @@ export interface SessionHost {
   /** The tab an avatar is assigned right now, and the lease id that names its session. */
   leaseOf(character: string): { tabId: number; leaseId: string } | null;
   say(character: string, tabId: number | undefined, text: string, tier?: number): void;
+  /** The reply so far, while the model writes it ('' clears it). */
+  draft?(character: string, text: string): void;
   setState(character: string, tabId: number | undefined, state: string): void;
 }
 
@@ -27,6 +29,8 @@ interface Run {
   startedAt: number;
   seq: number;
   finished: boolean;
+  /** The reply as streamed so far. */
+  draft?: string;
   resolve: () => void;
   done: Promise<void>;
 }
@@ -96,6 +100,7 @@ export function createSessionManager(conn: GatewayConnection, host: SessionHost)
     run.finished = true;
     if (runs.get(run.sessionKey) === run) runs.delete(run.sessionKey);
     persist();
+    if (run.draft) host.draft?.(run.character, '');
     if (reply?.text) host.say(run.character, run.tabId, reply.text, reply.notice ? undefined : 3);
     host.setState(run.character, run.tabId, 'Idle');
     run.resolve();
@@ -177,11 +182,19 @@ export function createSessionManager(conn: GatewayConnection, host: SessionHost)
       if (event.event === 'chat') {
         if (typeof p.seq === 'number') { if (p.seq <= run.seq) return; run.seq = p.seq; }
         if (p.state === 'status') host.setState(run.character, run.tabId, PHASES[p.phase] || 'Working…');
-        else if (p.state === 'delta') host.setState(run.character, run.tabId, 'Writing…');
+        else if (p.state === 'delta') {
+          // Show the reply as it is written: the full text so far when sent, else the new part.
+          const full = messageText(p.message);
+          run.draft = full || (p.replace ? String(p.deltaText || '') : `${run.draft || ''}${p.deltaText || ''}`);
+          host.setState(run.character, run.tabId, 'Writing…');
+          host.draft?.(run.character, run.draft);
+        }
         else if (p.state === 'final') finish(run, { text: messageText(p.message) || NO_REPLY });
         else if (p.state === 'aborted') finish(run);
         else if (p.state === 'error') finish(run, { text: failureText(run.character, p.errorMessage || p.errorKind || 'the agent stopped'), notice: true });
       } else if (event.event === 'agent' && p.stream === 'tool' && p.data?.phase === 'start') {
+        // Words written before a tool call were a step on the way, not the reply.
+        if (run.draft) { run.draft = ''; host.draft?.(run.character, ''); }
         host.setState(run.character, run.tabId, `Using ${toolLabel(p.data.name)}…`);
       }
     },

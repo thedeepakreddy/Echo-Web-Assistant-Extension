@@ -189,3 +189,52 @@ test('chats: an avatar\'s messages go to its own thread, not the saved chat', as
   await chats.clearAgentThread('echo-analyst');
   assert.deepEqual(plain(await chats.agentThread('echo-analyst')), []);
 });
+
+test('approvals: a denied payment is not asked again in the same task, and the agent is told why', async () => {
+  const chrome = fakeChrome({ 1: { url: 'https://shop.example/checkout' } });
+  const clicks = [];
+  chrome.tabs.sendMessage = (tabId, msg, cb) => {
+    const reply = msg.action === 'inspect_action' ? { success: true, result: { label: '<button> "Place order"', sensitive: false } }
+      : msg.type !== 'DOM_ACTION' ? {} : (clicks.push(msg.action), { success: true, result: 'Clicked' });
+    if (cb) { cb(reply); return undefined; }
+    return Promise.resolve(reply);
+  };
+  const leases = loadLeases(chrome);
+  await leases.assignLease('echo-analyst', 1);
+  // Approval prompts time out at once here.
+  const fastTimers = { setTimeout: fn => setTimeout(fn, 5), clearTimeout };
+  const safety = loadTs('src/background/safety.ts', { chrome, ...fastTimers }, { 'agents/leases': leases });
+  const isolation = { agentScope: () => null, assertInScope: async () => {}, assertIsolatedUrl: () => {} };
+  const tools = loadTs('src/background/tools.ts', { chrome }, { 'agents/leases': leases, './safety': safety, './isolation': isolation, './response-cache': {} });
+  const click = () => tools.executeTool('click_element', { ref: 'e1' }, 1, { deadline: Date.now() + 30_000 });
+  const answer = async approved => { for (let i = 0; i < 50 && !safety.pendingApproval(1); i++) await new Promise(r => setTimeout(r, 1)); safety.settleApproval(safety.pendingApproval(1).id, approved); };
+
+  // Without an answer the prompt times out: ask in chat first.
+  const unanswered = click();
+  await assert.rejects(unanswered, /did not answer the approval in time/);
+  // Denied: say so, and do not ask again for the same action in this task.
+  const denied = click();
+  await answer(false);
+  await assert.rejects(denied, /The user denied this action/);
+  await assert.rejects(click(), /already denied this action in this task/);
+  assert.equal(safety.pendingApproval(1), null, 'no second prompt');
+  assert.deepEqual(clicks, [], 'nothing was clicked');
+  // A new task (after a stop) may ask again; allowed, the click happens.
+  safety.cancelTask('echo-analyst');
+  const allowed = click();
+  await answer(true);
+  assert.equal(await allowed, 'Clicked');
+  assert.deepEqual(clicks, ['click_element']);
+});
+
+test('approvals: going to the checkout page does not ask; paying there does', () => {
+  const chrome = fakeChrome();
+  const safety = loadTs('src/background/safety.ts', { chrome }, { 'agents/leases': { DEFAULT_SCOPE: 'default', scopeForTab: () => 'default' } });
+  const click = (label, url = 'https://shop.example/cart') => safety.sensitiveAction({ tool: 'click_element', label, url });
+  assert.equal(click('<a> "Checkout"'), null);
+  assert.equal(click('<button> "Proceed to checkout"'), null);
+  assert.equal(click('<button> "Place order"'), 'payment');
+  assert.equal(click('<button> "Buy now"'), 'payment');
+  assert.equal(click('<button> "Checkout"', 'https://shop.example/checkout'), 'payment', 'on the checkout page itself, it pays');
+  assert.equal(click('<button> "Continue"', 'https://shop.example/checkout/review'), 'payment');
+});

@@ -14,7 +14,8 @@ import { createSessionManager, type SessionManager } from './sessions';
 import { AVATAR_AGENTS, allCommands, avatarByCharacter } from './registry';
 import { TESTED_OPENCLAW } from './setup-script';
 import { leaseFor, leasesReady, listLeases, onLeaseChange } from '../agents/leases';
-import { sayAs, setStateAs } from '../bus';
+import { sayAs, setStateAs, draftAs } from '../bus';
+import { addEvidence, resetEvidence, unverifiedClaims } from '../grounding';
 import type { GatewayBrowserDeviceTokenStore, HelloOk } from '@openclaw/gateway-client/browser';
 
 export interface OpenClawSettings { enabled: boolean; url: string; sharedToken?: string }
@@ -228,8 +229,11 @@ async function start() {
 
   sessions = createSessionManager(operatorConn, {
     leaseOf: character => { const l = leaseFor(character); return l ? { tabId: l.tabId, leaseId: l.leaseId } : null; },
-    say: (character, tabId, text, tier) => sayAs(character, tabId, text, tier),
+    // A reply is checked against what the avatar's tools read; notices (no tier) are ECHO's own words.
+    say: (character, tabId, text, tier) => sayAs(character, tabId, text, tier,
+      tier === undefined ? {} : { unverified: unverifiedClaims(character, text) }),
     setState: (character, tabId, state) => setStateAs(character, tabId, state),
+    draft: (character, text) => draftAs(character, text),
   });
   node = nodeConn;
   operator = operatorConn;
@@ -251,6 +255,7 @@ export function startOpenClaw(): void {
   onLeaseChange(({ agent, lease, previous }) => {
     if (previous && previous.tabId !== lease?.tabId) {
       resetLooking(agent);
+      resetEvidence(agent);
       sessions?.abort(agent).catch(() => {});
     }
     syncTools?.().catch(() => {});
@@ -273,6 +278,7 @@ export async function runOnOpenClaw(character: string, text: string): Promise<vo
   if (!sessions || !syncTools) throw new Error('OpenClaw is not connected.');
   // The avatar's tools must be on offer before its run starts.
   await syncTools();
+  addEvidence(character, text);
   return sessions.run(character, text);
 }
 

@@ -6,7 +6,11 @@ import { ICONS } from '../theme/icons';
 import { CHARACTERS, REACTOR, characterById, characterAsset, themeFor, themeVars } from '../characters';
 
 interface Source { title: string; url: string }
-interface Msg { role: 'user' | 'echo'; text: string; ts?: number; tier?: number; sources?: Source[]; searchHtml?: string }
+interface Msg {
+  role: 'user' | 'echo'; text: string; ts?: number; tier?: number; sources?: Source[]; searchHtml?: string;
+  /** Facts ECHO did not find in what it read for this conversation. */
+  unverified?: string[];
+}
 interface Approval { id: string; action: string; detail: string; site: string; tabId?: number }
 interface ActionLog { action: string; detail: string; status: string; ts: number }
 interface ChatInfo { activeId: string | null; temporary: boolean; title: string }
@@ -71,6 +75,8 @@ function Panel() {
   const [chat, setChat] = useState<ChatInfo>({ activeId: null, temporary: false, title: 'New chat' });
   const [input, setInput] = useState('');
   const [status, setStatus] = useState('');
+  // An avatar's reply while it is being written; replaced by the reply itself.
+  const [draft, setDraft] = useState('');
   const [usage, setUsage] = useState<{ steps: number; taskTokens: number; sessionTokens: number } | null>(null);
   const [report, setReport] = useState('');
   const [approval, setApproval] = useState<Approval | null>(null);
@@ -164,6 +170,7 @@ function Panel() {
     viewRef.current = next;
     setView(next);
     setMessages([]);
+    setDraft('');
     setUsage(null);
     setStatus('');
     if (next === DEFAULT_VIEW) {
@@ -261,13 +268,15 @@ function Panel() {
     const onMessage = (m: any) => {
       if (m.type === 'ECHO_AGENTS_CHANGED') { applyAgents(m.agents || []); followTab(activeTabRef.current); return; }
       if (m.type === 'ECHO_OPENCLAW_STATUS_CHANGED') { refreshOpenClaw(); return; }
+      if (m.type === 'ECHO_DRAFT') { if (m.agent === viewRef.current) setDraft(String(m.text || '')); return; }
       // Each avatar talks in its own thread; only the one on screen updates it.
       if (THREAD_TRAFFIC.includes(m.type) && (m.agent || DEFAULT_VIEW) !== viewRef.current) {
         if (m.type === 'ECHO_TASK_STATUS') { refreshAgents(); if (!m.active) refreshReport(); }
         return;
       }
       if (m.type === 'ECHO_SAY') {
-        setMessages(prev => [...prev, { role: 'echo', text: m.text, tier: m.tier, sources: m.sources, searchHtml: m.searchHtml }]);
+        setDraft('');
+        setMessages(prev => [...prev, { role: 'echo', text: m.text, tier: m.tier, sources: m.sources, searchHtml: m.searchHtml, unverified: m.unverified }]);
         refreshReport();
         refreshIsolation();
       } else if (m.type === 'ECHO_USER_ECHO') {
@@ -628,6 +637,12 @@ function Panel() {
                 <div className="echo-bubble">
                   <Cited text={m.text} sources={m.sources} />
                   {tier && <span className={`echo-tier ${tier.cls}`} title={tier.title}>{tier.label}</span>}
+                  {m.unverified && m.unverified.length > 0 && (
+                    <div className="echo-unverified" role="note"
+                      title="ECHO could not find these in what it read for this chat. They may be calculated, or made up: check them on the page.">
+                      {ICONS.warning}<span>Unverified: {m.unverified.join(' · ')}</span>
+                    </div>
+                  )}
                   {m.sources && m.sources.length > 0 && (
                     <ol className="echo-sources">
                       {m.sources.map((s, j) => <li key={j}>{safeUrl(s.url)
@@ -647,6 +662,11 @@ function Panel() {
               </div>
             );
           })}
+          {draft && (
+            <div className="echo-msg echo draft" aria-live="polite">
+              <div className="echo-bubble"><Cited text={draft} /></div>
+            </div>
+          )}
           {status && <div className="echo-status">{status}</div>}
         </div>
       </div>

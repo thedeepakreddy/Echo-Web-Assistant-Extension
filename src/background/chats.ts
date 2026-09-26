@@ -19,6 +19,8 @@ export interface ChatEntry {
   searchHtml?: string;   // Google Search suggestions widget (Gemini grounding)
   /** The scope that said or received it: an avatar id, or 'default'. */
   agent?: string;
+  /** Facts in the reply that ECHO did not find in what its tools read. */
+  unverified?: string[];
 }
 
 export interface Chat { id: string; title: string; created: number; updated: number; messages: ChatEntry[] }

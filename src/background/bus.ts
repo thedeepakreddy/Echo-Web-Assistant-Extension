@@ -34,22 +34,26 @@ export function safeSendMessage(tabId: number | undefined | null, msg: any, agen
   if (tabId !== undefined && tabId !== null) {
     chrome.tabs.sendMessage(tabId, msg).catch(() => { /* no content script on this tab */ });
   }
-  if (msg.type === 'ECHO_SAY' || msg.type === 'ECHO_STATE' || msg.type === 'ECHO_USAGE' || msg.type === 'ECHO_SUGGEST') {
+  if (['ECHO_SAY', 'ECHO_STATE', 'ECHO_USAGE', 'ECHO_SUGGEST', 'ECHO_DRAFT'].includes(msg.type)) {
     try { chrome.runtime.sendMessage(msg).catch(() => {}); } catch { /* no page open */ }
   }
   if (msg.type === 'ECHO_SAY' && typeof msg.text === 'string') {
-    pushTranscript({ role: 'echo', text: msg.text, tier: msg.tier, sources: msg.sources, searchHtml: msg.searchHtml, agent: msg.agent });
+    pushTranscript({ role: 'echo', text: msg.text, tier: msg.tier, sources: msg.sources, searchHtml: msg.searchHtml, agent: msg.agent,
+      ...(msg.unverified?.length ? { unverified: msg.unverified } : {}) });
   }
 }
+
+/** Extra details a reply can carry: citations, and facts ECHO could not find in what it read. */
+export interface SayExtra { sources?: Source[]; searchHtml?: string; unverified?: string[] }
 
 /**
  * Speak/print a reply. `tier` tags which brain answered (0-3) for the UI badge;
  * `extra` carries web-search citations.
  */
-export function say(tabId: number | undefined, text: string, tier?: number,
-  extra: { sources?: Source[]; searchHtml?: string } = {}) {
+export function say(tabId: number | undefined, text: string, tier?: number, extra: SayExtra = {}) {
   const sources = extra.sources?.length ? extra.sources : undefined;
-  safeSendMessage(tabId, { type: 'ECHO_SAY', text, tier, sources, searchHtml: extra.searchHtml });
+  const unverified = extra.unverified?.length ? extra.unverified : undefined;
+  safeSendMessage(tabId, { type: 'ECHO_SAY', text, tier, sources, searchHtml: extra.searchHtml, unverified });
 }
 
 /** Update the orb / panel status line. */
@@ -62,8 +66,14 @@ export function setState(tabId: number | undefined, state: string) {
  * outlives a tab lookup: an agent's run keeps its thread even if its tab
  * was released or closed before the reply arrived.
  */
-export function sayAs(agent: string, tabId: number | undefined, text: string, tier?: number) {
-  safeSendMessage(tabId, { type: 'ECHO_SAY', text, tier }, agent);
+export function sayAs(agent: string, tabId: number | undefined, text: string, tier?: number, extra: SayExtra = {}) {
+  const unverified = extra.unverified?.length ? extra.unverified : undefined;
+  safeSendMessage(tabId, { type: 'ECHO_SAY', text, tier, unverified }, agent);
+}
+
+/** A reply still being written: shown live in the avatar's thread, replaced by the final ECHO_SAY. */
+export function draftAs(agent: string, text: string) {
+  try { chrome.runtime.sendMessage({ type: 'ECHO_DRAFT', agent, text }).catch(() => {}); } catch { /* no page open */ }
 }
 export function setStateAs(agent: string, tabId: number | undefined, state: string) {
   safeSendMessage(tabId, { type: 'ECHO_STATE', state }, agent);

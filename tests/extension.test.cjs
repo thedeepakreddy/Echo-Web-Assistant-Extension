@@ -57,7 +57,9 @@ test('screen read omits password values and refuses sensitive typing', () => {
   };
   const document = { querySelectorAll: () => [secret], body: { innerText: 'Login page' }, title: 'Demo' };
   const window = { getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }), innerHeight: 800, innerWidth: 1200 };
-  const actions = loadTs('src/content/actions.ts', { document, window, location: { href: 'https://example.com/login' } });
+  const globals = { document, window, location: { href: 'https://example.com/login' } };
+  const snapshot = loadTs('src/content/snapshot.ts', globals);
+  const actions = loadTs('src/content/actions.ts', globals, spec => (spec === './snapshot' ? snapshot : {}));
   const screen = actions.handleDomAction('read_screen', {}).result;
   assert.equal(screen.includes('demo-secret-123'), false);
   assert.match(screen, /input:password/);

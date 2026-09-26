@@ -14,9 +14,12 @@ export interface ApprovalPrompt {
   tabId?: number;
 }
 
+/** How an approval ended: the user allowed or denied it, did not answer in time, or the task stopped. */
+export type ApprovalOutcome = 'approved' | 'denied' | 'timeout' | 'stopped';
+
 interface PendingApproval {
   prompt: ApprovalPrompt;
-  resolve: (approved: boolean) => void;
+  resolve: (outcome: ApprovalOutcome) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -63,43 +66,74 @@ function broadcast(prompt: ApprovalPrompt | { id: string; type: 'ECHO_APPROVAL_C
  */
 export async function requestApproval(action: string, detail: string, tabId?: number,
   timeoutMs: number = APPROVAL_TIMEOUT_MS): Promise<boolean> {
-  if (timeoutMs < MIN_APPROVAL_MS) return false;
+  return (await requestApprovalOutcome(action, detail, tabId, timeoutMs)) === 'approved';
+}
+
+/** As requestApproval, saying how it ended, so an agent can be told the difference. */
+export async function requestApprovalOutcome(action: string, detail: string, tabId?: number,
+  timeoutMs: number = APPROVAL_TIMEOUT_MS): Promise<ApprovalOutcome> {
+  if (timeoutMs < MIN_APPROVAL_MS) return 'timeout';
   const epoch = currentTaskEpoch(tabId);
   let site = 'the current page';
   if (tabId != null) {
     try { site = new URL((await chrome.tabs.get(tabId)).url || '').hostname || site; } catch { /* no tab */ }
   }
   // Stopped while looking up the site: never show a prompt for a stopped task.
-  if (currentTaskEpoch(tabId) !== epoch) return false;
+  if (currentTaskEpoch(tabId) !== epoch) return 'stopped';
   const prompt: ApprovalPrompt = {
     id: crypto.randomUUID(), action, detail: detail.slice(0, 180), site, tabId,
   };
   return new Promise(resolve => {
-    const timer = setTimeout(() => settleApproval(prompt.id, false), Math.min(timeoutMs, APPROVAL_TIMEOUT_MS));
+    const timer = setTimeout(() => close(prompt.id, 'timeout'), Math.min(timeoutMs, APPROVAL_TIMEOUT_MS));
     pending.set(prompt.id, { prompt, resolve, timer });
     broadcast(prompt);
   });
 }
 
-export function settleApproval(id: string, approved: boolean, senderTabId?: number): boolean {
+function close(id: string, outcome: ApprovalOutcome): boolean {
   const item = pending.get(id);
   if (!item) return false;
-  // A content-script answer must come from the tab where the action is pending.
-  if (senderTabId != null && senderTabId !== item.prompt.tabId) return false;
   pending.delete(id);
   clearTimeout(item.timer);
-  item.resolve(approved === true);
+  item.resolve(outcome);
   const clear = { type: 'ECHO_APPROVAL_CLEAR' as const, id };
   chrome.runtime.sendMessage(clear).catch(() => {});
   if (item.prompt.tabId != null) chrome.tabs.sendMessage(item.prompt.tabId, clear).catch(() => {});
   return true;
 }
 
-/** Deny waiting approvals for one scope's tabs, or all of them. */
+/** The user's answer to a prompt. */
+export function settleApproval(id: string, approved: boolean, senderTabId?: number): boolean {
+  const item = pending.get(id);
+  if (!item) return false;
+  // A content-script answer must come from the tab where the action is pending.
+  if (senderTabId != null && senderTabId !== item.prompt.tabId) return false;
+  return close(id, approved === true ? 'approved' : 'denied');
+}
+
+/** Close waiting approvals for one scope's tabs, or all of them: that work was stopped. */
 export function denyPendingApprovals(scope?: string): void {
   for (const [id, item] of [...pending.entries()]) {
-    if (!scope || scopeForTab(item.prompt.tabId) === scope) settleApproval(id, false);
+    if (!scope || scopeForTab(item.prompt.tabId) === scope) close(id, 'stopped');
   }
+}
+
+// Actions the user denied: asking again for the same one in the same task
+// would only nag. Keyed by the page and the control; forgotten after a stop
+// (a new task epoch) or after a while.
+const DENIAL_MEMORY_MS = 10 * 60_000;
+const denials = new Map<string, number>();
+const denialKey = (tabId: number | undefined, what: string) => `${scopeForTab(tabId)}|${currentTaskEpoch(tabId)}|${what}`;
+
+export function rememberDenial(tabId: number | undefined, what: string): void {
+  const now = Date.now();
+  for (const [key, at] of denials) if (now - at > DENIAL_MEMORY_MS) denials.delete(key);
+  denials.set(denialKey(tabId, what), now);
+}
+
+export function wasDenied(tabId: number | undefined, what: string): boolean {
+  const at = denials.get(denialKey(tabId, what));
+  return at !== undefined && Date.now() - at <= DENIAL_MEMORY_MS;
 }
 
 export async function logAction(action: string, detail: string, status: 'approved' | 'denied' | 'done' | 'failed'): Promise<void> {
@@ -117,6 +151,10 @@ export type SensitiveKind = 'payment' | 'message';
 
 const PAY_LABEL = /\b(pay|payment|pay now|buy|buy now|purchase|check ?out|place (your )?order|order now|complete (your )?(order|purchase|payment)|confirm (and )?(pay|order|purchase|payment|booking)|book (now|and pay)|subscribe|start (my |your )?(trial|subscription)|upgrade|renew|donate|send money|transfer|top ?up|recharge|add funds|withdraw)\b/i;
 const SEND_LABEL = /\b(send|send (now|email|mail|message)|reply( all)?|forward|post|publish|tweet|retweet|repost|comment|submit (comment|review|reply|post)|share (post|now))\b/i;
+// "Checkout", "Proceed to checkout": controls that open the checkout page.
+const CHECKOUT_PAGE_LINK = /^(?:(?:proceed|go|continue) to )?(?:secure )?check ?out$/i;
+/** The name inside a control label like `<button> "Proceed to checkout"`. */
+const controlName = (label: string) => (label.match(/^<[^>]*>\s*"(.*)"$/)?.[1] ?? label).trim();
 const CONFIRM_LABEL = /\b(confirm|continue|submit|next|proceed|complete|finish|done|ok)\b/i;
 const PAYMENT_PAGE = /(checkout|payment|\/pay\b|\/pay\/|billing|purchase|\/buy\/|order-?review|place-?order)/i;
 const PAYMENT_HOST = /(^|\.)(paypal\.com|stripe\.com|razorpay\.com|paytm\.com|phonepe\.com|pay\.google\.com|payments\.google\.com|venmo\.com|wise\.com|revolut\.com|cash\.app|squareup\.com|checkout\.shopify\.com)$/i;
@@ -135,6 +173,8 @@ export function sensitiveAction(a: { tool: string; label?: string; url?: string;
   const onPaymentPage = PAYMENT_HOST.test(host) || PAYMENT_PAGE.test(path);
 
   if (a.tool === 'click_element' || a.tool === 'click_selector') {
+    // Going to the checkout page is not paying; the payment click there still asks.
+    if (!onPaymentPage && CHECKOUT_PAGE_LINK.test(controlName(label))) return null;
     if (PAY_LABEL.test(label)) return 'payment';
     if (onPaymentPage && CONFIRM_LABEL.test(label)) return 'payment';
     if (SEND_LABEL.test(label)) return 'message';

@@ -57,6 +57,15 @@ async function tabInfo(tabId?: number): Promise<{ url: string; title: string }> 
 
 function pick<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
 
+// Local rules answer one simple command. A request that chains steps ("search
+// for mugs, open the first result and tell me…") is a task for the model.
+const NEXT_STEP = /(?:,|\band\b|\bthen\b)\s*(?:then\s+)?(?:open|click|tell|go|add|buy|order|check|compare|read|summari[sz]e|fill|type|select|choose|pick|find|show|give|send|book|sign)\b/i;
+function compoundTask(input: string): boolean {
+  return NEXT_STEP.test(input);
+}
+// "this shop", "on this page", "here": the current page, not a web search.
+const CURRENT_PAGE = /\b(this|the current|current)\s+(page|article|site|tab|document|shop|store|website|web ?page|list|catalog(?:ue)?|listing)\b|\bon this page\b|\bhere\b/i;
+
 /** Normalise a URL fragment the user spoke ("youtube" -> https://youtube.com). */
 function toUrl(raw: string): string | null {
   let s = raw.trim().replace(/[.,!?;]+$/, '').replace(/^["']|["']$/g, '');
@@ -295,7 +304,10 @@ rule(/\b(stop|delete|remove|cancel)\b.{0,15}\b(watch(er|ing)?|monitor)\b\s*["']?
 // --- extraction ---
 rule(/\b(extract|find|get|grab|list|show|collect)\b.{0,20}\b(all\s+)?(emails?|e-mails?|phones?|phone numbers?|prices?|links?|urls?|dates?|handles?|images?|headings?)\b/i,
   async (m, ctx) => {
-    if (ctx.tabId == null) return null;
+    if (ctx.tabId == null || compoundTask(ctx.input)) return null;
+    // "find the price of the blue kettle" asks for one thing, not every price.
+    const plural = /\b(e-?mails|phones|phone numbers|prices|links|urls|dates|handles|images|headings)\b/i.test(ctx.input);
+    if (!m[2] && !plural) return null;
     const word = m[3].toLowerCase();
     const kind =
       /mail/.test(word) ? 'emails' :
@@ -317,7 +329,10 @@ rule(/\b(extract|find|get|grab|list|show|collect)\b.{0,20}\b(all\s+)?(emails?|e-
 // --- form filling ---
 rule(/\b(fill|complete|autofill|auto-fill)\b.{0,20}\b(this |the )?(form|fields?|it)\b/i,
   async (_m, ctx) => {
-    if (ctx.tabId == null) return null;
+    if (ctx.tabId == null || compoundTask(ctx.input)) return null;
+    // Values given in the request ("with the name Sam Rivera and…") are for the
+    // model to type; this rule fills from what ECHO remembers about the user.
+    if (/\bwith\b(?!\s+(?:my|what you know|saved)\b)|@|\d{3,}|["“:]/i.test(ctx.input)) return null;
     const mem = await memory();
     if (!Object.keys(mem).length) {
       return "I don't have any saved details to fill with. Tell me things like \"remember my email is you@example.com\" first.";
@@ -412,8 +427,9 @@ rule(/^(?:google|search(?: the web)?(?: for)?)\s+(.{2,120}?)\s*$/i,
 
 async function siteSearch(siteName: string, query: string, ctx: Ctx): Promise<string | null> {
   const q = query.trim();
-  // "search this page for X" is a find-on-page request, not a web search.
-  if (/\b(this|the current|current)\s+(page|article|site|tab|document)\b|\bon this page\b/i.test(q)) return null;
+  // "search this shop for X" is a task on the current page, not a web search;
+  // "search for X, open the first result…" is several steps.
+  if (CURRENT_PAGE.test(q) || compoundTask(ctx.input)) return null;
   const site = matchSite(siteName);
   if (!site) return null;
   const url = siteSearchUrl(site, q);

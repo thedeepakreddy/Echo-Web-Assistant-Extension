@@ -5,9 +5,10 @@ import {
 } from './brain';
 import { routeUserInput, ingestPage, getSettings, setSettings, routerReport, domainAllowed, sameSite, cloudReady, answerFromTabsOnDevice } from './smart-router';
 import { saveHighlight, highlightsForUrl, allHighlights, clearHighlights, forgetHighlightsForHost } from './highlights';
-import { runWatcherCheck, rehydrateWatchers, WATCH_ALARM_PREFIX, listWatchers } from './page-watcher';
+import { runWatcherCheck, rehydrateWatchers, WATCH_ALARM_PREFIX, listWatchers, onWatcherFired } from './page-watcher';
+import { OWN_WATCHERS } from './openclaw/browser-tools';
 import { cachePrune } from './response-cache';
-import { say, setState, clearTranscript, echoUser } from './bus';
+import { say, sayAs, setState, clearTranscript, echoUser } from './bus';
 import { settleApproval, cancelTask, pendingApproval, approvalById } from './safety';
 import { isIndexable, forgetSite, clearKB, kbSize, recentPages } from './knowledge-base';
 import { cacheClear } from './response-cache';
@@ -251,6 +252,25 @@ async function runRequest(text: string, tabId?: number, opts: RequestOptions = {
     if (await finishTask(id)) setState(tabId, 'Idle');
   }
 }
+
+// An avatar's own watcher wakes it in its tab, to carry on with what it set
+// the watcher up for. An avatar busy with another task is only told: starting
+// a run would stop the one in progress. The user's notification goes out either way.
+onWatcherFired(async (watcher, detail) => {
+  const owners = ((await chrome.storage.local.get([OWN_WATCHERS]))[OWN_WATCHERS] || {}) as Record<string, string[]>;
+  const agent = Object.keys(owners).find(a => owners[a].includes(watcher.id));
+  if (!agent) return;
+  await leasesReady;
+  const lease = leaseFor(agent);
+  if (!lease) return;
+  const news = `⏰ Watcher "${watcher.label}" fired: ${detail}.`;
+  if (runningScopes().includes(agent) || await openClawRunPending(agent)) {
+    sayAs(agent, lease.tabId, `${news} I'll look at it after the current task.`, 0);
+    return;
+  }
+  runRequest(`${news} Carry on with what you set it up for; if there was nothing, tell me what changed.`, undefined, { agent })
+    .catch(error => console.warn('[ECHO] Waking an avatar failed:', error));
+});
 
 /** Tell the side panel which chat is showing now. */
 async function broadcastChatState(state: Awaited<ReturnType<typeof chatState>>) {

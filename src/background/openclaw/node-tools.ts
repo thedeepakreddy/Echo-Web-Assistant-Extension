@@ -25,7 +25,21 @@ export interface NodeTool {
   run(args: Record<string, unknown>, ctx: InvokeContext): Promise<unknown>;
 }
 
-type Outcome = { ok: true; payload: unknown } | { ok: false; error: { code: string; message: string } };
+type Outcome = { ok: true; payload: ToolResult } | { ok: false; error: { code: string; message: string } };
+
+export type ToolContent = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
+/** A result in the agent's own format, which OpenClaw passes through unchanged. */
+export interface ToolResult { content: ToolContent[] }
+
+/**
+ * What the model reads: text exactly as the tool wrote it, data as compact
+ * JSON. (Anything else OpenClaw re-encodes as indented JSON, escaping every
+ * newline and quote: more tokens, harder to read.)
+ */
+export function toToolResult(value: unknown): ToolResult {
+  if (value && typeof value === 'object' && Array.isArray((value as ToolResult).content)) return value as ToolResult;
+  return { content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value ?? null) }] };
+}
 
 const PLUGIN_ID = 'echo';
 const REMEMBERED_RESULTS = 200;
@@ -62,7 +76,7 @@ export function createNodeToolHost(conn: GatewayConnection, tools: NodeTool[]) {
         timer = setTimeout(() => reject(new ToolError('TIMEOUT', 'ECHO ran out of time for this step.')),
           Math.max(0, ctx.deadline - Date.now()));
       });
-      return { ok: true, payload: await Promise.race([tool.run(args, ctx), expired]) };
+      return { ok: true, payload: toToolResult(await Promise.race([tool.run(args, ctx), expired])) };
     } catch (error: any) {
       return { ok: false, error: { code: error instanceof ToolError ? error.code : 'TOOL_FAILED',
         message: String(error?.message || error || 'Tool failed').slice(0, 500) } };

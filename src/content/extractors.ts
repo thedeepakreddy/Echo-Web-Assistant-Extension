@@ -78,3 +78,35 @@ export function toCSV(kind: string, items: string[]): string {
   const esc = (s: string) => `"${s.replace(/"/g, '""')}"`;
   return `${esc(kind)}\n${items.map(esc).join('\n')}\n`;
 }
+
+/**
+ * Repeated items: a product grid, search results, list rows. Groups of three
+ * or more look-alike siblings (same tag and classes), best first by how much
+ * text they hold. Each item is its text exactly as the page shows it.
+ */
+export function extractList(index = 0): { group: number; groups: { index: number; count: number; first: string }[]; items: string[] } {
+  const clean = (s: string) => s.replace(/\s+/g, ' ').trim();
+  const found: { items: string[]; score: number }[] = [];
+  for (const parent of Array.from(document.querySelectorAll<HTMLElement>('body, body *'))) {
+    if (parent.children.length < 3 || parent.closest('#echo-extension-root')) continue;
+    const bySignature = new Map<string, HTMLElement[]>();
+    for (const child of Array.from(parent.children) as HTMLElement[]) {
+      const signature = `${child.tagName}.${Array.from(child.classList).sort().join('.')}`;
+      bySignature.set(signature, [...(bySignature.get(signature) || []), child]);
+    }
+    for (const members of bySignature.values()) {
+      if (members.length < 3) continue;
+      const texts = members.map(m => clean(m.innerText || '')).filter(t => t.length >= 3);
+      if (texts.length < 3) continue;
+      const average = texts.reduce((a, t) => a + t.length, 0) / texts.length;
+      found.push({ items: texts, score: texts.length * Math.min(average, 200) });
+    }
+  }
+  found.sort((a, b) => b.score - a.score);
+  const wanted = Math.min(Math.max(0, Math.floor(index) || 0), Math.max(0, found.length - 1));
+  return {
+    group: wanted,
+    groups: found.slice(0, 6).map((g, i) => ({ index: i, count: g.items.length, first: g.items[0].slice(0, 60) })),
+    items: (found[wanted]?.items || []).slice(0, 60).map(t => (t.length > 300 ? `${t.slice(0, 299)}…` : t)),
+  };
+}
