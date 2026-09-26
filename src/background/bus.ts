@@ -29,8 +29,8 @@ export async function clearTranscript(): Promise<void> {
  * 'default' for the classic ECHO — so the panel keeps each avatar's thread
  * apart and the transcript lands in the right chat.
  */
-export function safeSendMessage(tabId: number | undefined | null, msg: any) {
-  msg = { ...msg, agent: scopeForTab(tabId) };
+export function safeSendMessage(tabId: number | undefined | null, msg: any, agent?: string) {
+  msg = { ...msg, agent: agent ?? scopeForTab(tabId) };
   if (tabId !== undefined && tabId !== null) {
     chrome.tabs.sendMessage(tabId, msg).catch(() => { /* no content script on this tab */ });
   }
@@ -55,6 +55,18 @@ export function say(tabId: number | undefined, text: string, tier?: number,
 /** Update the orb / panel status line. */
 export function setState(tabId: number | undefined, state: string) {
   safeSendMessage(tabId, { type: 'ECHO_STATE', state });
+}
+
+/**
+ * Reply in a named avatar's thread (and on `tabId`'s orb). For work that
+ * outlives a tab lookup: an agent's run keeps its thread even if its tab
+ * was released or closed before the reply arrived.
+ */
+export function sayAs(agent: string, tabId: number | undefined, text: string, tier?: number) {
+  safeSendMessage(tabId, { type: 'ECHO_SAY', text, tier }, agent);
+}
+export function setStateAs(agent: string, tabId: number | undefined, state: string) {
+  safeSendMessage(tabId, { type: 'ECHO_STATE', state }, agent);
 }
 
 /** Echo the user's own message into the transcript + panel of the scope that owns `tabId`. */
