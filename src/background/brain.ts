@@ -34,7 +34,9 @@ RULE 4 — BE TOKEN-EFFICIENT (CRITICAL — the user has limited API quota):
 
 RULE 5 — SPEAK NATURALLY: Short, natural replies. Never read out raw HTML or code. When done, briefly say what you did.
 
-RULE 6 — VIDEOS: On a video page, call get_video_transcript to learn what is said; the page text does not contain it.`;
+RULE 6 — VIDEOS: On a video page, call get_video_transcript to learn what is said; the page text does not contain it.
+
+RULE 7 — HONEST: Answer only from what your tools showed you in this conversation. Never say a task is done unless tool results show it. If you stopped early or a tool failed, say so.`;
 
 interface EchoTool {
   name: string;
@@ -156,31 +158,54 @@ function resetHistory(st: BrainState) {
 // and screenshots are large, so if we keep every past result at full size the
 // per-request token count grows with each step and quota is exhausted in a
 // couple of tasks. The fix has two parts:
-//   1. pruneFor*  — at the start of a task, keep only a short, VALID tail
-//      (must begin with a real user turn so we never send an orphaned
-//      tool_result, which the APIs reject).
+//   1. prune*  — at the start of a task, keep only a short, VALID tail made of
+//      whole tasks: it begins with the user's own message (never an orphaned
+//      tool result, which the APIs reject) and ends on the assistant's words.
+//      A long task stays whole, so "keep going" still knows what was asked.
 //   2. compress*  — before EVERY request, collapse all tool outputs except the
-//      most recent one to a tiny stub. The model keeps the latest screen in
-//      full and can re-read if it genuinely needs older context. This bounds
-//      per-request size no matter how many steps a task takes.
+//      last few to a tiny stub. The model keeps recent reads in full (enough
+//      to compare page chunks without re-reading them) and can re-read older
+//      ones. This bounds per-request size no matter how many steps a task takes.
 // ---------------------------------------------------------------------------
 
 const STALE = '[older screen data cleared to save tokens — call read_screen again if you need it]';
 const KEEP_MESSAGES = 8;      // cross-task history tail
 const MAX_STEPS = 12;         // hard cap on tool iterations per task
+const FRESH_RESULTS = 3;      // tool results kept in full within a task
+// Said, and kept in the history, when a task hits MAX_STEPS: the next message
+// ("keep going", "did you finish?") must see that the task is not done.
+const STOPPED_EARLY = `(I stopped after ${MAX_STEPS} steps. The task is not finished yet.)`;
+const STEP_LIMIT_SAY = "That took more steps than expected, so I've stopped before finishing. Want me to keep going?";
+const EMPTY_REPLY = "The model sent back an empty answer, so I stopped. Please try again.";
+
+/**
+ * The history tail for the next task: from the start of the task that holds
+ * the last KEEP_MESSAGES messages, ending on the assistant's last reply.
+ * Unfinished tool exchanges and unanswered requests (after a stop) are dropped.
+ */
+function pruneHistory(conv: any[], isTaskStart: (m: any) => boolean, isReply: (m: any) => boolean): any[] {
+  let from = Math.max(0, conv.length - KEEP_MESSAGES);
+  while (from > 0 && !isTaskStart(conv[from])) from--;
+  const s = conv.slice(from);
+  while (s.length && !isTaskStart(s[0])) s.shift();
+  while (s.length && !isReply(s[s.length - 1])) s.pop();
+  return s;
+}
+
+/** Indices of all but the last FRESH_RESULTS messages that `holdsResult` matches. */
+function staleResults(conv: any[], holdsResult: (m: any) => boolean): Set<number> {
+  const all: number[] = [];
+  conv.forEach((m, i) => { if (holdsResult(m)) all.push(i); });
+  return new Set(all.slice(0, Math.max(0, all.length - FRESH_RESULTS)));
+}
 
 // --- Claude (Anthropic) ---
+const claudeHasToolUse = (m: any) => Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_use');
+const claudeHasToolResult = (m: any) => m.role === 'user' && Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_result');
 function pruneClaude(conv: any[]): any[] {
-  let s = conv.length > KEEP_MESSAGES ? conv.slice(conv.length - KEEP_MESSAGES) : conv.slice();
-  // Front: must begin with a real user text turn (no orphaned tool_result).
-  while (s.length && !(s[0].role === 'user' && typeof s[0].content === 'string')) s.shift();
-  // Back: drop any dangling/incomplete turn (e.g. after an abort) so we always
-  // end on a clean assistant reply and never send an unmatched tool_use.
-  const hasToolUse = (m: any) => m.role === 'assistant' && Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_use');
-  const isToolResult = (m: any) => m.role === 'user' && Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_result');
-  while (s.length && (isToolResult(s[s.length - 1]) || hasToolUse(s[s.length - 1]))) s.pop();
-  if (s.length && s[s.length - 1].role !== 'assistant') return []; // keep role alternation valid
-  return s;
+  return pruneHistory(conv,
+    m => m.role === 'user' && typeof m.content === 'string',
+    m => m.role === 'assistant' && !claudeHasToolUse(m));
 }
 function compressClaude(conv: any[]) {
   // Old search results are large and never needed again; the latest assistant
@@ -192,72 +217,40 @@ function compressClaude(conv: any[]) {
       conv[i].content = stripClaudeSearchBlocks(conv[i].content);
     }
   }
-  let last = -1;
-  for (let i = 0; i < conv.length; i++) {
-    const m = conv[i];
-    if (m.role === 'user' && Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_result')) last = i;
-  }
-  for (let i = 0; i < conv.length; i++) {
-    if (i === last) continue;
-    const m = conv[i];
-    if (m.role === 'user' && Array.isArray(m.content)) {
-      m.content = m.content.map((b: any) =>
-        b.type === 'tool_result'
-          ? { type: 'tool_result', tool_use_id: b.tool_use_id, content: [{ type: 'text', text: STALE }] }
-          : b);
-    }
+  for (const i of staleResults(conv, claudeHasToolResult)) {
+    conv[i].content = conv[i].content.map((b: any) =>
+      b.type === 'tool_result'
+        ? { type: 'tool_result', tool_use_id: b.tool_use_id, content: [{ type: 'text', text: STALE }] }
+        : b);
   }
 }
 
 // --- Gemini (Google) ---
+const geminiParts = (m: any): any[] => (Array.isArray(m.parts) ? m.parts : []);
 function pruneGemini(conv: any[]): any[] {
-  let s = conv.length > KEEP_MESSAGES ? conv.slice(conv.length - KEEP_MESSAGES) : conv.slice();
-  while (s.length && !(s[0].role === 'user' && Array.isArray(s[0].parts)
-    && s[0].parts.some((p: any) => p.text) && !s[0].parts.some((p: any) => p.functionResponse))) {
-    s.shift();
-  }
-  const hasFnCall = (m: any) => m.role === 'model' && Array.isArray(m.parts) && m.parts.some((p: any) => p.functionCall);
-  const isFnResp = (m: any) => m.role === 'user' && Array.isArray(m.parts) && m.parts.some((p: any) => p.functionResponse);
-  while (s.length && (isFnResp(s[s.length - 1]) || hasFnCall(s[s.length - 1]))) s.pop();
-  if (s.length && s[s.length - 1].role !== 'model') return [];
-  return s;
+  return pruneHistory(conv,
+    m => m.role === 'user' && geminiParts(m).some(p => p.text) && !geminiParts(m).some(p => p.functionResponse),
+    m => m.role === 'model' && !geminiParts(m).some(p => p.functionCall));
 }
 function compressGemini(conv: any[]) {
-  let last = -1;
-  for (let i = 0; i < conv.length; i++) {
-    const m = conv[i];
-    if (m.role === 'user' && Array.isArray(m.parts) && m.parts.some((p: any) => p.functionResponse || p.inlineData)) last = i;
-  }
-  for (let i = 0; i < conv.length; i++) {
-    if (i === last) continue;
-    const m = conv[i];
-    if (m.role === 'user' && Array.isArray(m.parts)) {
-      m.parts = m.parts.map((p: any) => {
-        if (p.functionResponse) return { functionResponse: { name: p.functionResponse.name, response: { result: STALE } } };
-        if (p.inlineData) return { text: STALE };
-        return p;
-      });
-    }
+  const stale = staleResults(conv, m => m.role === 'user' && geminiParts(m).some(p => p.functionResponse || p.inlineData));
+  for (const i of stale) {
+    conv[i].parts = conv[i].parts.map((p: any) => {
+      if (p.functionResponse) return { functionResponse: { name: p.functionResponse.name, response: { result: STALE } } };
+      if (p.inlineData) return { text: STALE };
+      return p;
+    });
   }
 }
 
 // --- OpenAI-compatible (Groq / Together / OpenRouter) ---
 function pruneOpenAI(conv: any[]): any[] {
-  let s = conv.length > KEEP_MESSAGES ? conv.slice(conv.length - KEEP_MESSAGES) : conv.slice();
-  while (s.length && !(s[0].role === 'user' && typeof s[0].content === 'string')) s.shift();
-  // Drop dangling tool call / tool result turns (e.g. after an abort) so we
-  // never send assistant tool_calls without their following tool messages.
-  const hasToolCalls = (m: any) => m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
-  const isToolMsg = (m: any) => m.role === 'tool';
-  while (s.length && (isToolMsg(s[s.length - 1]) || hasToolCalls(s[s.length - 1]))) s.pop();
-  return s;
+  return pruneHistory(conv,
+    m => m.role === 'user' && typeof m.content === 'string',
+    m => m.role === 'assistant' && !(Array.isArray(m.tool_calls) && m.tool_calls.length > 0));
 }
 function compressOpenAI(conv: any[]) {
-  let last = -1;
-  for (let i = 0; i < conv.length; i++) if (conv[i].role === 'tool') last = i;
-  for (let i = 0; i < conv.length; i++) {
-    if (i !== last && conv[i].role === 'tool' && typeof conv[i].content === 'string') conv[i].content = STALE;
-  }
+  for (const i of staleResults(conv, m => m.role === 'tool' && typeof m.content === 'string')) conv[i].content = STALE;
 }
 
 /** Stop the model call in progress for one scope (the classic ECHO by default). */
@@ -534,7 +527,8 @@ async function runClaudeLoop(st: BrainState, client: Anthropic, userInput: strin
     while (!isFinished) {
       if (signal.aborted) throw new Error('Aborted by user');
       if (steps++ >= MAX_STEPS) {
-        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: "That took more steps than expected, so I've stopped. Want me to keep going?" });
+        st.claude.push({ role: 'assistant', content: STOPPED_EARLY });
+        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: STEP_LIMIT_SAY });
         safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
         break;
       }
@@ -567,21 +561,30 @@ async function runClaudeLoop(st: BrainState, client: Anthropic, userInput: strin
       const cu: any = (response as any).usage || {};
       accumulateUsage(activeTabId, (cu.input_tokens || 0) + (cu.cache_read_input_tokens || 0) + (cu.cache_creation_input_tokens || 0), cu.output_tokens || 0);
 
-      st.claude.push({ role: 'assistant', content: response.content });
-
       // Claude splits a cited answer into many text blocks: say it once, with sources.
       const { text, sources } = formatClaudeCitations(response.content as any[]);
+      const toolUses = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+      if (!text && !toolUses.length && response.stop_reason !== 'pause_turn') {
+        // Nothing to say or do: never end a task in silence, and keep a
+        // non-empty turn in the history (the API rejects empty ones).
+        const said = response.stop_reason === 'refusal' ? 'Claude declined this request.'
+          : response.stop_reason === 'max_tokens' ? 'My reply hit the length limit before I could answer. Please ask again, more narrowly.'
+          : EMPTY_REPLY;
+        st.claude.push({ role: 'assistant', content: said });
+        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: said });
+        safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
+        break;
+      }
+      st.claude.push({ role: 'assistant', content: response.content });
       if (text) safeSendMessage(activeTabId, { type: 'ECHO_SAY', text, sources });
 
       if (response.stop_reason === 'refusal') {
-        if (!text) safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: 'Claude declined this request.' });
         safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
         break;
       }
       // A long server-side search can pause; resending the conversation resumes it.
       if (response.stop_reason === 'pause_turn') continue;
 
-      const toolUses = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
       if (!toolUses.length) {
         isFinished = true;
         if (response.stop_reason === 'max_tokens') {
@@ -675,12 +678,81 @@ function friendlyGeminiError(raw: string): string {
     return 'That Gemini API key was rejected. Check it in Options, or get a new one at aistudio.google.com/apikey.';
   }
 
+  if (GEMINI_TRANSIENT.test(raw)) {
+    return 'Gemini is overloaded right now on every model I tried. Please try again in a minute.';
+  }
+
   // Unknown error: keep it short rather than dumping the whole JSON payload.
   const first = raw.match(/"message":\s*"([^"]{5,200})/)?.[1] || raw.slice(0, 200);
   return `Gemini error: ${first}`;
 }
 
 const GEMINI_FALLBACKS = ['gemini-3.5-flash-lite', 'gemini-3.5-flash'];
+// "High demand" and internal errors pass in seconds; another model may answer now.
+const GEMINI_TRANSIENT = /\b50[03]\b|UNAVAILABLE|overloaded|high demand|INTERNAL/i;
+const GEMINI_RETRY_MS = 2_000;
+const GEMINI_FRIENDLY = /^(Your Gemini key|Gemini's rate limit|That Gemini API key|Gemini error:|Gemini is overloaded|None of the Gemini)/;
+
+const pause = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+  const t = setTimeout(resolve, ms);
+  signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('Aborted by user')); }, { once: true });
+});
+
+/**
+ * One Gemini request, trying each model in turn. A retired model (404) or one
+ * out of quota (429, metered per model) is skipped for the rest of the task
+ * via `dead`; an overloaded one is retried once, after a short pause.
+ */
+async function geminiRequest(models: string[], dead: Set<string>, signal: AbortSignal,
+  send: (model: string) => Promise<any>): Promise<any> {
+  let lastError = '';
+  for (let round = 0; round < 2; round++) {
+    let overloaded = false;
+    for (const model of models) {
+      if (dead.has(model)) continue;
+      if (signal.aborted) throw new Error('Aborted by user');
+      try {
+        return await send(model);
+      } catch (e: any) {
+        if (signal.aborted) throw new Error('Aborted by user');
+        const msg = String(e?.message ?? e);
+        lastError = msg;
+        if (/404|NOT_FOUND|no longer available/.test(msg) || /429|RESOURCE_EXHAUSTED|quota/i.test(msg)) {
+          console.warn(`[ECHO] Gemini model ${model} unavailable, trying the next one.`);
+          dead.add(model);
+        } else if (GEMINI_TRANSIENT.test(msg)) {
+          console.warn(`[ECHO] Gemini model ${model} overloaded, trying the next one.`);
+          overloaded = true;
+        } else {
+          throw new Error(friendlyGeminiError(msg));
+        }
+      }
+    }
+    if (!overloaded) break;
+    if (round === 0) await pause(GEMINI_RETRY_MS, signal);
+  }
+  throw new Error(lastError ? friendlyGeminiError(lastError)
+    : 'None of the Gemini models responded. Your key may be invalid, or the models are unavailable in your region — try Groq in Options instead.');
+}
+
+/**
+ * Why a Gemini turn came back with nothing to say or do, and whether asking
+ * again may help (a malformed tool call or an empty turn often succeeds).
+ */
+function geminiEmptyTurn(response: any): { text: string; retry: boolean } {
+  const candidate = response?.candidates?.[0];
+  const reason = String(candidate?.finishReason || response?.promptFeedback?.blockReason || '');
+  if (/SAFETY|BLOCK|PROHIBITED|SPII|RECITATION/.test(reason)) {
+    return { text: "Gemini's safety filter blocked that answer. Try rephrasing the request.", retry: false };
+  }
+  if (reason === 'MAX_TOKENS') {
+    return { text: 'My reply hit the length limit before I could answer. Please ask again, more narrowly.', retry: false };
+  }
+  if (/MALFORMED_FUNCTION_CALL|UNEXPECTED_TOOL_CALL/.test(reason)) {
+    return { text: 'Gemini kept sending broken tool calls, so I stopped. Please try again.', retry: true };
+  }
+  return { text: EMPTY_REPLY, retry: true };
+}
 
 /**
  * A Gemini answer grounded in Google Search. This is its own request (no page
@@ -689,36 +761,20 @@ const GEMINI_FALLBACKS = ['gemini-3.5-flash-lite', 'gemini-3.5-flash'];
 async function runGeminiSearch(st: BrainState, client: GoogleGenAI, userInput: string, tabId: number, signal: AbortSignal, systemPrompt: string, model: string) {
   const safeSendMessage = senderFor(st);
   const accumulateUsage = usageMeter(st, safeSendMessage);
-  let lastQuotaError = '';
   try {
     st.gemini = pruneGemini(st.gemini);
     st.gemini.push({ role: 'user', parts: [{ text: userInput }] });
 
-    let response: any = null;
-    for (const m of [...new Set([model, ...GEMINI_FALLBACKS])]) {
-      if (signal.aborted) throw new Error('Aborted by user');
-      try {
-        response = await client.models.generateContent({
-          model: m,
-          contents: st.gemini,
-          config: {
-            systemInstruction: `${systemPrompt}\n\nAnswer using Google Search results. Be concise and factual.`,
-            tools: [{ googleSearch: {} }],
-            abortSignal: signal,
-          },
-        });
-        break;
-      } catch (e: any) {
-        const msg = String(e?.message ?? e);
-        if (signal.aborted) throw new Error('Aborted by user');
-        if (/404|NOT_FOUND|no longer available/.test(msg)) continue;
-        if (/429|RESOURCE_EXHAUSTED|quota/i.test(msg)) { lastQuotaError = msg; continue; }
-        throw new Error(friendlyGeminiError(msg));
-      }
-    }
-    if (!response) {
-      throw new Error(lastQuotaError ? friendlyGeminiError(lastQuotaError) : 'None of the Gemini models responded to the search request.');
-    }
+    const response = await geminiRequest([...new Set([model, ...GEMINI_FALLBACKS])], new Set(), signal, m =>
+      client.models.generateContent({
+        model: m,
+        contents: st.gemini,
+        config: {
+          systemInstruction: `${systemPrompt}\n\nAnswer using Google Search results. Be concise and factual.`,
+          tools: [{ googleSearch: {} }],
+          abortSignal: signal,
+        },
+      }));
     accumulateUsage(tabId, response.usageMetadata?.promptTokenCount || 0, response.usageMetadata?.candidatesTokenCount || 0);
 
     const candidate = response.candidates?.[0];
@@ -735,8 +791,7 @@ async function runGeminiSearch(st: BrainState, client: GoogleGenAI, userInput: s
       return;
     }
     const msg = String(err.message || err);
-    const alreadyFriendly = /^(Your Gemini key|Gemini's rate limit|That Gemini API key|Gemini error:|None of the Gemini)/.test(msg);
-    safeSendMessage(tabId, { type: 'ECHO_SAY', text: alreadyFriendly ? msg : friendlyGeminiError(msg) });
+    safeSendMessage(tabId, { type: 'ECHO_SAY', text: GEMINI_FRIENDLY.test(msg) ? msg : friendlyGeminiError(msg) });
     safeSendMessage(tabId, { type: 'ECHO_STATE', state: 'Error' });
   }
 }
@@ -745,95 +800,67 @@ async function runGeminiLoop(st: BrainState, client: GoogleGenAI, userInput: str
   const safeSendMessage = senderFor(st);
   const accumulateUsage = usageMeter(st, safeSendMessage);
   let activeTabId = tabId;
-  // Remembered so that if every model is quota-blocked we can explain why.
-  let lastQuotaError = '';
   try {
     st.gemini = pruneGemini(st.gemini);
     st.gemini.push({ role: "user", parts: [{ text: userInput }] });
 
-    let isFinished = false;
     let steps = 0;
-
-    // Real, currently-available models only, cheapest/fastest first. (The old
-    // list started with non-existent models that 404'd, wasting a request each.)
-    // Fallbacks are current stable models (2.x is closed to new projects).
-    const GEMINI_MODELS = [...new Set([model, ...GEMINI_FALLBACKS])];
-    let modelIndex = 0;
+    // The chosen model first, then the fallbacks; models that fail for good
+    // (retired, or out of quota) are skipped for the rest of the task.
+    const models = [...new Set([model, ...GEMINI_FALLBACKS])];
+    const dead = new Set<string>();
+    let retriedEmpty = false;
 
     const activeTools = selectTools(userInput, task.tools);
-    while (!isFinished) {
+    const functionDeclarations = activeTools.map(t => ({
+      name: t.name,
+      description: t.description,
+      parameters: toGeminiSchema(t.schema),
+    }));
+    while (true) {
       if (steps++ >= MAX_STEPS) {
-        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: "That took more steps than expected, so I've stopped. Want me to keep going?" });
+        st.gemini.push({ role: 'model', parts: [{ text: STOPPED_EARLY }] });
+        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: STEP_LIMIT_SAY });
         safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
         break;
       }
       compressGemini(st.gemini);
-      let response: any;
-      let succeeded = false;
-
-      while (modelIndex < GEMINI_MODELS.length && !succeeded) {
-        if (signal.aborted) throw new Error('Aborted by user');
-        try {
-          const functionDeclarations = activeTools.map(t => ({
-            name: t.name,
-            description: t.description,
-            parameters: toGeminiSchema(t.schema)
-          }));
-
-          response = await client.models.generateContent({
-            model: GEMINI_MODELS[modelIndex],
-            contents: st.gemini,
-            config: {
-              systemInstruction: systemPrompt,
-              tools: [{ functionDeclarations }],
-            }
-          });
-          succeeded = true;
-        } catch (e: any) {
-          const msg = String(e?.message ?? e);
-          const is404 = msg.includes('404') || msg.includes('NOT_FOUND') || msg.includes('no longer available');
-          const is429 = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || /quota/i.test(msg);
-
-          if (is404) {
-            console.warn('[ECHO] Model ' + GEMINI_MODELS[modelIndex] + ' unavailable, trying next...');
-            modelIndex++;
-          } else if (is429) {
-            // Gemini quota is metered per model, so another model may still be
-            // usable. Advance rather than failing the whole task.
-            console.warn('[ECHO] Model ' + GEMINI_MODELS[modelIndex] + ' quota exhausted, trying next...');
-            lastQuotaError = msg;
-            modelIndex++;
-          } else {
-            throw new Error(friendlyGeminiError(msg));
-          }
-        }
-      }
-
-      if (!succeeded || !response) {
-        throw new Error(lastQuotaError
-          ? friendlyGeminiError(lastQuotaError)
-          : 'None of the Gemini models responded. Your key may be invalid, or the models are unavailable in your region — try Groq in Options instead.');
-      }
+      const response = await geminiRequest(models, dead, signal, m =>
+        client.models.generateContent({
+          model: m,
+          contents: st.gemini,
+          config: { systemInstruction: systemPrompt, tools: [{ functionDeclarations }], abortSignal: signal },
+        }));
 
       accumulateUsage(activeTabId, response.usageMetadata?.promptTokenCount || 0, response.usageMetadata?.candidatesTokenCount || 0);
 
-      const content = response.candidates?.[0]?.content;
-      if (!content) break;
-
-      st.gemini.push({ role: "model", parts: content.parts || [] });
-
-      const parts = content.parts ?? [];
+      const parts: any[] = response.candidates?.[0]?.content?.parts ?? [];
       const calls = parts.filter((p: any) => p.functionCall).map((p: any) => p.functionCall);
+      const said = parts.filter((p: any) => typeof p.text === 'string' && !p.thought && p.text.trim());
 
-      for (const p of parts) {
-        if (p.text?.trim()) {
-          if (signal.aborted) throw new Error('Aborted by user');
-          safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: p.text.trim() });
+      if (!calls.length && !said.length) {
+        // Asked once more when that may help; otherwise (or on a second
+        // failure) the reason is said and kept in the history, never silence.
+        const empty = geminiEmptyTurn(response);
+        if (empty.retry && !retriedEmpty) {
+          retriedEmpty = true;
+          steps--;
+          continue;
         }
+        st.gemini.push({ role: 'model', parts: [{ text: empty.text }] });
+        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: empty.text });
+        safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
+        break;
+      }
+
+      // Kept whole: Gemini needs the turn's thought signatures back.
+      st.gemini.push({ role: "model", parts });
+      for (const p of said) {
+        if (signal.aborted) throw new Error('Aborted by user');
+        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: p.text.trim() });
       }
 
       if (!calls.length) {
-        isFinished = true;
         safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
         break;
       }
@@ -869,8 +896,7 @@ async function runGeminiLoop(st: BrainState, client: GoogleGenAI, userInput: str
     // friendlyGeminiError already produced a readable message — don't bury it
     // under another "Gemini Error:" prefix.
     const msg = String(err.message || err);
-    const alreadyFriendly = /^(Your Gemini key|Gemini's rate limit|That Gemini API key|Gemini error:|None of the Gemini)/.test(msg);
-    safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: alreadyFriendly ? msg : friendlyGeminiError(msg) });
+    safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: GEMINI_FRIENDLY.test(msg) ? msg : friendlyGeminiError(msg) });
     safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Error' });
   }
 }
@@ -955,7 +981,8 @@ async function runOpenAICompatibleLoop(
     while (!isFinished) {
       if (signal.aborted) throw new Error('Aborted by user');
       if (steps++ >= MAX_STEPS) {
-        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: "That took more steps than expected, so I've stopped. Want me to keep going?" });
+        st.openai.push({ role: 'assistant', content: STOPPED_EARLY });
+        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: STEP_LIMIT_SAY });
         safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
         break;
       }
@@ -1011,11 +1038,16 @@ async function runOpenAICompatibleLoop(
         }
       }
 
+      const hasCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
+      const said = typeof msg.content === 'string' ? msg.content.trim() : '';
+      if (!hasCalls && !said) {
+        // Never end a task in silence, and never keep an empty turn.
+        msg = { role: 'assistant', content: EMPTY_REPLY };
+        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: EMPTY_REPLY });
+      }
       st.openai.push(msg);
 
-      if (msg.content && typeof msg.content === 'string' && msg.content.trim()) {
-        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: msg.content.trim() });
-      }
+      if (said) safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: said });
 
       if (msg.tool_calls && msg.tool_calls.length > 0) {
         const toolResults: any[] = [];

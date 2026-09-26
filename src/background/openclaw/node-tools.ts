@@ -105,9 +105,12 @@ export function createNodeToolHost(conn: GatewayConnection, tools: NodeTool[]) {
 
   return {
     commands: tools.map(tool => tool.command),
-    /** The gateway drops a node's tools when it disconnects: call on every hello. */
-    publish: () => conn.request('node.pluginTools.update', {
-      tools: tools.map(({ name, description, parameters, command }) =>
+    /**
+     * Offer these tools to agents (all by default), replacing what was offered
+     * before. The gateway drops a node's tools when it disconnects: call on every hello.
+     */
+    publish: (include: (tool: NodeTool) => boolean = () => true) => conn.request('node.pluginTools.update', {
+      tools: tools.filter(include).map(({ name, description, parameters, command }) =>
         ({ pluginId: PLUGIN_ID, name, description, parameters, command })),
     }),
     handleEvent(event: EventFrame) {

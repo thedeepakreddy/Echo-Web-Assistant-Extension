@@ -37,6 +37,19 @@ const STORE_KEY = 'echo_openclaw_runs';
 // agent.wait holds the request open this long each round; the loop keeps
 // waiting until the run ends.
 const WAIT_ROUND_MS = 25_000;
+// A run that ends without any words is not reported as a success.
+const NO_REPLY = "I stopped without writing a reply, so I can't confirm the result. Ask me what I found.";
+
+/** What the user reads when a run fails; the gateway's wording where nothing clearer applies. */
+export function failureText(character: string, why: string): string {
+  // The gateway renames tools two browsers both offer, so neither copy is allowed.
+  if (/No callable tools remain/i.test(why)) {
+    const tagline = avatarByCharacter(character)?.tagline || 'this avatar';
+    return `I couldn't reach my browser tools. If Echo · ${tagline} also has a tab in another browser `
+      + 'connected to this OpenClaw gateway, release it there, then try again.';
+  }
+  return `I couldn't finish that: ${String(why).replace(/\.$/, '')}.`;
+}
 const PHASES: Record<string, string> = {
   preparing_context: 'Getting ready…', starting_model: 'Thinking…', memory_flushing: 'Tidying memory…',
 };
@@ -77,12 +90,13 @@ export function createSessionManager(conn: GatewayConnection, host: SessionHost)
     return run;
   }
 
-  function finish(run: Run, reply?: { text: string; tier?: number }) {
+  /** End a run once. A notice (a failure, a stop) is said without a source badge. */
+  function finish(run: Run, reply?: { text: string; notice?: boolean }) {
     if (run.finished) return;
     run.finished = true;
     if (runs.get(run.sessionKey) === run) runs.delete(run.sessionKey);
     persist();
-    if (reply?.text) host.say(run.character, run.tabId, reply.text, reply.tier ?? 3);
+    if (reply?.text) host.say(run.character, run.tabId, reply.text, reply.notice ? undefined : 3);
     host.setState(run.character, run.tabId, 'Idle');
     run.resolve();
   }
@@ -100,12 +114,13 @@ export function createSessionManager(conn: GatewayConnection, host: SessionHost)
       }
       if (run.finished) return;
       if (result?.status === 'ok') {
-        finish(run, { text: messageText(result.terminalReply) || 'Done.' });
+        finish(run, { text: messageText(result.terminalReply) || NO_REPLY });
       } else if (result?.status === 'error') {
         const why = result.error?.message || result.errorMessage || result.stopReason || 'the agent stopped';
-        finish(run, { text: result.stopReason === 'superseded' ? '' : `I couldn't finish that: ${why}.`, tier: 0 });
+        finish(run, { text: result.stopReason === 'superseded' ? '' : failureText(run.character, why), notice: true });
       } else if (result?.endedAt && result?.status && result.status !== 'pending' && result.status !== 'timeout') {
-        finish(run, { text: messageText(result.terminalReply) });
+        // Ended on the gateway's side (a stop from ECHO finishes the run first).
+        finish(run, { text: messageText(result.terminalReply) || `I stopped before finishing (${result.status}).`, notice: true });
       }
     }
   }
@@ -163,9 +178,9 @@ export function createSessionManager(conn: GatewayConnection, host: SessionHost)
         if (typeof p.seq === 'number') { if (p.seq <= run.seq) return; run.seq = p.seq; }
         if (p.state === 'status') host.setState(run.character, run.tabId, PHASES[p.phase] || 'Working…');
         else if (p.state === 'delta') host.setState(run.character, run.tabId, 'Writing…');
-        else if (p.state === 'final') finish(run, { text: messageText(p.message) || 'Done.' });
+        else if (p.state === 'final') finish(run, { text: messageText(p.message) || NO_REPLY });
         else if (p.state === 'aborted') finish(run);
-        else if (p.state === 'error') finish(run, { text: `I couldn't finish that: ${p.errorMessage || p.errorKind || 'the agent stopped'}.`, tier: 0 });
+        else if (p.state === 'error') finish(run, { text: failureText(run.character, p.errorMessage || p.errorKind || 'the agent stopped'), notice: true });
       } else if (event.event === 'agent' && p.stream === 'tool' && p.data?.phase === 'start') {
         host.setState(run.character, run.tabId, `Using ${toolLabel(p.data.name)}…`);
       }
