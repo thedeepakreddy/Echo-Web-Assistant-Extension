@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Kettle &amp; Co. — Shop</title></head>
+<body><h1>Kettle &amp; Co.</h1>
+<p>Cart: <span id="cart-count">0</span> items · <a href="checkout.html" id="checkout">Checkout</a></p>
+<form onsubmit="event.preventDefault(); filter(document.getElementById('q').value)">
+<input id="q" placeholder="Search products" aria-label="Search products"><button>Search</button></form>
+<ul id="products">
+<li data-name="Blue Kettle"><a href="product.html?id=blue-kettle">Blue Kettle</a> — $39.00 <button onclick="add('blue-kettle')">Add to cart</button></li>
+<li data-name="Steel Kettle"><a href="product.html?id=steel-kettle">Steel Kettle</a> — $24.50 <button onclick="add('steel-kettle')">Add to cart</button></li>
+<li data-name="Glass Kettle"><a href="product.html?id=glass-kettle">Glass Kettle</a> — $52.00 <button onclick="add('glass-kettle')">Add to cart</button></li>
+<li data-name="Speckled Mug"><a href="product.html?id=speckled-mug">Speckled Mug</a> — $14.00 <button onclick="add('speckled-mug')">Add to cart</button></li>
+</ul>
+<script>
+function cart() { try { return JSON.parse(localStorage.getItem('cart') || '[]'); } catch { return []; } }
+function add(id) { const c = cart(); c.push(id); localStorage.setItem('cart', JSON.stringify(c)); render(); }
+function render() { document.getElementById('cart-count').textContent = String(cart().length); window.__cart = cart(); }
+function filter(q) { q = q.toLowerCase(); for (const li of document.querySelectorAll('#products li')) li.hidden = !li.dataset.name.toLowerCase().includes(q); }
+render();
+</script></body></html>

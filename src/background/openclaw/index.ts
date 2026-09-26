@@ -1,22 +1,21 @@
-// ECHO ↔ OpenClaw gateway (Phase 0).
+// ECHO ↔ OpenClaw gateway.
 //
 // Off unless `echo_openclaw.enabled` is set. When on, ECHO keeps two sockets
 // to the gateway — node (offers tools) and operator (drives agent runs) — and
 // offers each avatar a read-only `<avatar>_observe` tool for the one tab that
-// avatar is assigned to. Assignments live in session storage, so they end with
-// the browser session, the same way tab ids do.
+// avatar is assigned to (see agents/leases.ts).
 
 import { createGatewayConnection, type GatewayConnection, type GatewayState } from './connection';
 import { createNodeToolHost, type NodeTool } from './node-tools';
 import { deviceIdentity, indexedDbKeyStore } from './identity';
 import { executeTool } from '../tools';
+import { leaseFor, leasesReady } from '../agents/leases';
 import type { GatewayBrowserDeviceTokenStore } from '@openclaw/gateway-client/browser';
 
 export interface OpenClawSettings { enabled: boolean; url: string; sharedToken?: string }
 
 const SETTINGS_KEY = 'echo_openclaw';
 const TOKENS_KEY = 'echo_openclaw_device_tokens';
-export const LEASES_KEY = 'echo_openclaw_leases';
 const STATE_KEY = 'echo_openclaw_state';
 const DEFAULT_URL = 'ws://127.0.0.1:18790';
 // Under Chrome's 30 s idle limit with room to spare.
@@ -28,6 +27,9 @@ const NODE_START_FALLBACK_MS = 5_000;
 
 /** Phase 0 wires two avatars; Phase 2 derives all eight from src/characters. */
 export const AVATARS = ['analyst', 'style'] as const;
+
+/** Tool-name slug → avatar id: 'analyst' is the character 'echo-analyst'. */
+const agentFor = (slug: string) => (slug === 'echo' || slug === 'reactor' ? slug : `echo-${slug}`);
 
 const tokenKey = (p: { clientId: string; deviceId: string; role: string }) => `${p.deviceId}:${p.clientId}:${p.role}`;
 const tokenStore: GatewayBrowserDeviceTokenStore = {
@@ -50,9 +52,9 @@ const tokenStore: GatewayBrowserDeviceTokenStore = {
 
 /** The tab an avatar is assigned to, if it still exists. */
 async function leasedTab(avatar: string): Promise<chrome.tabs.Tab> {
-  const leases = ((await chrome.storage.session.get([LEASES_KEY]))[LEASES_KEY] || {}) as Record<string, number>;
-  const tabId = leases[avatar];
-  if (!Number.isInteger(tabId)) throw new Error(`Echo (${avatar}) has no tab assigned.`);
+  await leasesReady;
+  const tabId = leaseFor(agentFor(avatar))?.tabId;
+  if (tabId == null) throw new Error(`Echo (${avatar}) has no tab assigned.`);
   try { return await chrome.tabs.get(tabId); } catch { throw new Error(`The tab assigned to Echo (${avatar}) was closed.`); }
 }
 

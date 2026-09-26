@@ -3,17 +3,34 @@ import { createRoot } from 'react-dom/client';
 import './sidepanel.css';
 import { useAppearance } from '../theme/page-theme';
 import { ICONS } from '../theme/icons';
-import { characterById, characterAsset } from '../characters';
+import { CHARACTERS, REACTOR, characterById, characterAsset, themeFor, themeVars } from '../characters';
 
 interface Source { title: string; url: string }
 interface Msg { role: 'user' | 'echo'; text: string; ts?: number; tier?: number; sources?: Source[]; searchHtml?: string }
-interface Approval { id: string; action: string; detail: string; site: string }
+interface Approval { id: string; action: string; detail: string; site: string; tabId?: number }
 interface ActionLog { action: string; detail: string; status: string; ts: number }
 interface ChatInfo { activeId: string | null; temporary: boolean; title: string }
 interface ChatMeta { id: string; title: string; updated: number; count: number }
 interface Skill { id: string; shortcut: string; name: string; prompt: string }
 interface TabItem { id: number; title: string; url: string; favIconUrl?: string }
 interface Menu { kind: 'skill' | 'tab'; start: number; query: string; index: number }
+/** An avatar holding a tab (see background/agents/leases.ts). */
+interface AgentInfo { agent: string; tabId: number; children: number[]; title: string; url: string; working: boolean }
+
+/** The classic, unassigned ECHO thread. */
+const DEFAULT_VIEW = 'default';
+// Every avatar is called Echo; the tagline tells them apart. The orb is the core.
+const AVATARS = [...CHARACTERS.map(c => ({ id: c.id, tagline: c.tagline })), { id: REACTOR, tagline: 'Core' }];
+const taglineOf = (id: string) => AVATARS.find(a => a.id === id)?.tagline || 'Core';
+const ownsTab = (a: AgentInfo, tabId: number | null) => tabId != null && (a.tabId === tabId || a.children.includes(tabId));
+
+/** A small round portrait for an avatar; the orb for the reactor. */
+function Portrait({ id, size = 22 }: { id: string; size?: number }) {
+  const c = characterById(id);
+  return c
+    ? <img className="echo-avatar-img" src={characterAsset(c.id, 'portrait')} alt="" width={size} height={size} />
+    : <span className="echo-avatar-orb" style={{ width: size, height: size }} />;
+}
 
 // Which brain answered. Tier 3 is the only one that spends API quota.
 const TIERS: Record<number, { label: string; title: string; cls: string }> = {
@@ -67,6 +84,14 @@ function Panel() {
   const [isolated, setIsolated] = useState(false);
   const [isolation, setIsolation] = useState<{ allowed: boolean; open: boolean } | null>(null);
   const [skillDraft, setSkillDraft] = useState<{ name: string; shortcut: string; prompt: string } | null>(null);
+  // Which thread the panel shows and talks to: the classic ECHO or an avatar.
+  const [view, setView] = useState<string>(DEFAULT_VIEW);
+  const viewRef = useRef<string>(DEFAULT_VIEW);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const agentsRef = useRef<AgentInfo[]>([]);
+  const [rosterOpen, setRosterOpen] = useState(false);
+  const [activeTabId, setActiveTabId] = useState<number | null>(null);
+  const activeTabRef = useRef<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -92,15 +117,74 @@ function Panel() {
       .catch(() => {});
   };
   const applyChatState = (state: any) => {
-    if (!state) return;
+    if (!state || viewRef.current !== DEFAULT_VIEW) return;
     setChat({ activeId: state.activeId, temporary: !!state.temporary, title: state.title || 'New chat' });
     setMessages(Array.isArray(state.messages) ? state.messages : []);
+  };
+
+  // --- avatars ------------------------------------------------------------------
+
+  const applyAgents = (list: AgentInfo[]) => {
+    agentsRef.current = list;
+    setAgents(list);
+    // An avatar released (or whose tab closed) leaves its thread: back to ECHO.
+    if (viewRef.current !== DEFAULT_VIEW && !list.some(a => a.agent === viewRef.current)) showView(DEFAULT_VIEW);
+  };
+  const refreshAgents = () => {
+    chrome.runtime.sendMessage({ type: 'ECHO_AGENT_LIST' })
+      .then((r: any) => { if (r?.success) applyAgents(r.agents); })
+      .catch(() => {});
+  };
+  /** The panel follows the tab in front: its avatar's thread, or ECHO's. */
+  const followTab = (tabId: number | null) => {
+    activeTabRef.current = tabId;
+    setActiveTabId(tabId);
+    const owner = agentsRef.current.find(a => ownsTab(a, tabId));
+    showView(owner ? owner.agent : DEFAULT_VIEW);
+  };
+  const showView = (next: string) => {
+    if (next === viewRef.current) return;
+    viewRef.current = next;
+    setView(next);
+    setMessages([]);
+    setUsage(null);
+    setStatus('');
+    if (next === DEFAULT_VIEW) {
+      chrome.runtime.sendMessage({ type: 'ECHO_CHAT_STATE_REQUEST' })
+        .then((r: any) => { if (r?.success) applyChatState(r.state); })
+        .catch(() => {});
+    } else {
+      setChat({ activeId: null, temporary: false, title: `Echo · ${taglineOf(next)}` });
+      chrome.runtime.sendMessage({ type: 'ECHO_AGENT_THREAD', agent: next })
+        .then((r: any) => { if (r?.success && viewRef.current === next) setMessages(r.messages); })
+        .catch(() => {});
+    }
+    chrome.runtime.sendMessage({ type: 'ECHO_TASK_STATUS_REQUEST', agent: next })
+      .then((r: any) => { if (viewRef.current === next && r?.active) setStatus('Working…'); })
+      .catch(() => {});
+  };
+  const assignAvatar = (agent: string) => {
+    chrome.runtime.sendMessage({ type: 'ECHO_AGENT_ASSIGN', agent, tabId: activeTabRef.current ?? undefined })
+      .then((r: any) => {
+        if (!r?.success) throw new Error(r?.error || 'Could not assign the avatar.');
+        applyAgents(r.agents);
+        setRosterOpen(false);
+        showView(agent);
+        flash(`Echo · ${taglineOf(agent)} now works in this tab.`);
+      })
+      .catch(error => setStatus(error?.message || 'Could not assign the avatar.'));
+  };
+  const releaseAvatar = (agent: string) => {
+    chrome.runtime.sendMessage({ type: 'ECHO_AGENT_RELEASE', agent })
+      .then((r: any) => { if (r?.success) applyAgents(r.agents); })
+      .catch(() => {});
   };
 
   // Page memory is per-site opt-in; this panel is where you can see the site.
   const refreshSite = async () => {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      followTab(tab?.id ?? null);
       const url = tab?.url || '';
       const r: any = await chrome.runtime.sendMessage({ type: 'ECHO_PRIVACY_STATUS', url });
       setSite(r?.success && r.host ? { url, host: r.host, allowed: r.siteAllowed, eligible: r.siteEligible } : null);
@@ -143,14 +227,26 @@ function Panel() {
     refreshReport();
     refreshSkills();
     refreshIsolation();
-    chrome.runtime.sendMessage({ type: 'ECHO_TASK_STATUS_REQUEST' })
-      .then((r: any) => { if (r?.active) setStatus('Working…'); })
+    // Leases first, then the tab in front decides which thread shows.
+    chrome.runtime.sendMessage({ type: 'ECHO_AGENT_LIST' })
+      .then((r: any) => { if (r?.success) applyAgents(r.agents); })
+      .catch(() => {})
+      .finally(() => { refreshSite(); });
+    chrome.runtime.sendMessage({ type: 'ECHO_TASK_STATUS_REQUEST', agent: DEFAULT_VIEW })
+      .then((r: any) => { if (viewRef.current === DEFAULT_VIEW && r?.active) setStatus('Working…'); })
       .catch(() => {});
     chrome.runtime.sendMessage({ type: 'ECHO_PENDING_APPROVAL' })
       .then((r: any) => { if (r?.approval) setApproval(r.approval); })
       .catch(() => {});
 
+    const THREAD_TRAFFIC = ['ECHO_SAY', 'ECHO_USER_ECHO', 'ECHO_STATE', 'ECHO_USAGE', 'ECHO_TASK_STATUS'];
     const onMessage = (m: any) => {
+      if (m.type === 'ECHO_AGENTS_CHANGED') { applyAgents(m.agents || []); followTab(activeTabRef.current); return; }
+      // Each avatar talks in its own thread; only the one on screen updates it.
+      if (THREAD_TRAFFIC.includes(m.type) && (m.agent || DEFAULT_VIEW) !== viewRef.current) {
+        if (m.type === 'ECHO_TASK_STATUS') { refreshAgents(); if (!m.active) refreshReport(); }
+        return;
+      }
       if (m.type === 'ECHO_SAY') {
         setMessages(prev => [...prev, { role: 'echo', text: m.text, tier: m.tier, sources: m.sources, searchHtml: m.searchHtml }]);
         refreshReport();
@@ -162,7 +258,7 @@ function Panel() {
       } else if (m.type === 'ECHO_USAGE') {
         setUsage({ steps: m.steps, taskTokens: m.taskTokens, sessionTokens: m.sessionTokens });
       } else if (m.type === 'ECHO_APPROVAL_REQUEST') {
-        setApproval({ id: m.id, action: m.action, detail: m.detail, site: m.site });
+        setApproval({ id: m.id, action: m.action, detail: m.detail, site: m.site, tabId: m.tabId });
       } else if (m.type === 'ECHO_APPROVAL_CLEAR') {
         setApproval(prev => prev?.id === m.id ? null : prev);
       } else if (m.type === 'ECHO_ACTION_LOG') {
@@ -172,8 +268,10 @@ function Panel() {
       } else if (m.type === 'ECHO_CONVERSATION_CLEARED') {
         setMessages([]);
         setStatus('');
-      } else if (m.type === 'ECHO_TASK_STATUS' && !m.active) {
-        setStatus('');
+      } else if (m.type === 'ECHO_TASK_STATUS') {
+        // A task ends after the router has counted it, so the counter is current now.
+        if (!m.active) { setStatus(''); refreshReport(); }
+        refreshAgents();
       }
     };
     chrome.runtime.onMessage.addListener(onMessage);
@@ -286,8 +384,8 @@ function Panel() {
     const text = input.trim();
     if (!text || (menu && menuItems().length)) return;
     chrome.runtime.sendMessage({
-      type: 'USER_INPUT', text,
-      tabs: mentions.map(m => m.id), webSearch, isolated,
+      type: 'USER_INPUT', text, agent: view,
+      tabs: mentions.map(m => m.id), webSearch, isolated: isolated && view === DEFAULT_VIEW,
     }).catch(error => {
       setStatus(`Could not send: ${error?.message || 'extension unavailable'}`);
       setInput(text);
@@ -331,24 +429,51 @@ function Panel() {
 
   const reportLines = report ? report.split('\n') : [];
   const items = menuItems();
+  const onAvatar = view !== DEFAULT_VIEW;
+  const viewAgent = agents.find(a => a.agent === view);
+  const viewCharacter = onAvatar ? characterById(view) : character;
+  const inFront = agents.find(a => ownsTab(a, activeTabId));
+  const approvalAgent = approval?.tabId != null ? agents.find(a => ownsTab(a, approval.tabId!)) : undefined;
 
   return (
-    <div className="echo-panel">
+    // An avatar's thread wears that avatar's colours.
+    <div className="echo-panel" style={onAvatar ? themeVars(themeFor(view)) as React.CSSProperties : undefined}>
       <header className="echo-panel-header">
-        <span className={`echo-portrait${status ? ' busy' : ''}${chat.temporary ? ' temp' : ''}`} aria-hidden="true">
-          {character ? <img src={characterAsset(character.id, 'portrait')} alt="" /> : <span className="echo-orb-mini" />}
+        <span className={`echo-portrait${status ? ' busy' : ''}${chat.temporary && !onAvatar ? ' temp' : ''}`} aria-hidden="true">
+          {viewCharacter ? <img src={characterAsset(viewCharacter.id, 'portrait')} alt="" /> : <span className="echo-orb-mini" />}
         </span>
         <span className="echo-heading">
-          <span className="echo-title" title={chat.title}>{chat.temporary ? 'Temporary chat' : chat.title === 'New chat' ? (character?.name || 'ECHO') : chat.title}</span>
-          <span className="echo-subtitle">{status || (chat.temporary ? 'Not saved to history' : 'Online')}</span>
+          <span className="echo-title" title={chat.title}>{onAvatar ? `Echo · ${taglineOf(view)}`
+            : chat.temporary ? 'Temporary chat' : chat.title === 'New chat' ? (character?.name || 'ECHO') : chat.title}</span>
+          <span className="echo-subtitle">{status || (onAvatar ? `In ${viewAgent?.title || 'its tab'}`
+            : chat.temporary ? 'Not saved to history' : 'Online')}</span>
         </span>
         <span className="echo-toolbar-group">
+        <button className={`echo-icon ${rosterOpen ? 'on' : ''}`} onClick={() => { setRosterOpen(o => !o); setHistoryOpen(false); refreshAgents(); }}
+          title="Avatars: give a tab to an Echo" aria-label="Avatars">{ICONS.avatars}</button>
+        {!onAvatar && <>
         <button className={`echo-icon ${historyOpen ? 'on' : ''}`} onClick={openHistory} title="Chat history" aria-label="Chat history">{ICONS.history}</button>
         <button className={`echo-icon ${chat.temporary ? 'on' : ''}`} onClick={() => startChat(!chat.temporary)}
           title={chat.temporary ? 'Leave temporary chat' : 'Temporary chat: not saved to history'} aria-label="Temporary chat">{ICONS.ghost}</button>
         <button className="echo-icon" onClick={() => startChat(chat.temporary)} title="New chat" aria-label="New chat">{ICONS.plus}</button>
+        </>}
         </span>
       </header>
+
+      {agents.length > 0 && (
+        <div className="echo-threads" role="tablist" aria-label="Threads">
+          <button role="tab" aria-selected={!onAvatar} className={`echo-thread ${!onAvatar ? 'on' : ''}`} onClick={() => showView(DEFAULT_VIEW)}>
+            <Portrait id={character?.id || REACTOR} size={18} /><span>Echo</span>
+          </button>
+          {agents.map(a => (
+            <button key={a.agent} role="tab" aria-selected={view === a.agent} title={`Echo · ${taglineOf(a.agent)} — ${a.title}`}
+              className={`echo-thread ${view === a.agent ? 'on' : ''}`} onClick={() => showView(a.agent)}>
+              <Portrait id={a.agent} size={18} /><span>{taglineOf(a.agent)}</span>
+              {a.working && <i className="echo-thread-busy" aria-label="working" />}
+            </button>
+          ))}
+        </div>
+      )}
 
       {chat.temporary && (
         <div className="echo-temp-banner">Temporary chat: not saved to history, and answers aren't cached.</div>
@@ -370,7 +495,7 @@ function Panel() {
 
       {approval && (
         <div className="echo-approval" role="alertdialog" aria-label="Approve browser action">
-          <strong>Allow this browser action?</strong>
+          <strong>{approvalAgent ? `Echo · ${taglineOf(approvalAgent.agent)} asks: allow this?` : 'Allow this browser action?'}</strong>
           <span>{approval.detail} on {approval.site}</span>
           <div className="echo-approval-buttons">
             <button onClick={() => answerApproval(false)}>Deny</button>
@@ -403,6 +528,33 @@ function Panel() {
       )}
 
       <div className="echo-body">
+        {rosterOpen && (
+          <div className="echo-history echo-roster" role="dialog" aria-label="Avatars">
+            <div className="echo-history-head">
+              <strong>Avatars</strong>
+              <button className="echo-icon" onClick={() => setRosterOpen(false)} aria-label="Close avatars">{ICONS.close}</button>
+            </div>
+            <div className="echo-roster-hint">Give a tab to an Echo: it works there on its own, alongside the others.</div>
+            {AVATARS.map(({ id, tagline }) => {
+              const lease = agents.find(a => a.agent === id);
+              const tabTaken = !!inFront && inFront.agent !== id;
+              return (
+                <div key={id} className={`echo-history-row echo-roster-row ${lease ? 'active' : ''}`}>
+                  <Portrait id={id} size={34} />
+                  <span className="echo-roster-text">
+                    <span>Echo · {tagline}</span>
+                    <small>{lease ? `${lease.working ? 'Working in' : 'In'} ${lease.title || 'a tab'}` : 'Not assigned'}</small>
+                  </span>
+                  {lease && <button className="echo-roster-action" onClick={() => { showView(id); setRosterOpen(false); }}>Open</button>}
+                  {lease && <button className="echo-roster-action" onClick={() => releaseAvatar(id)}>Release</button>}
+                  {!lease && <button className="echo-roster-action primary" disabled={!site || tabTaken}
+                    title={!site ? 'Open a regular web page first' : tabTaken ? 'This tab already has an avatar' : 'Assign to the tab in front'}
+                    onClick={() => assignAvatar(id)}>Assign here</button>}
+                </div>
+              );
+            })}
+          </div>
+        )}
         {historyOpen && (
           <div className="echo-history" role="dialog" aria-label="Chat history">
             <div className="echo-history-head">
@@ -424,7 +576,14 @@ function Panel() {
         )}
 
         <div className="echo-messages" ref={scrollRef}>
-          {messages.length === 0 && (
+          {messages.length === 0 && onAvatar && (
+            <div className="echo-empty">
+              <span className="echo-empty-portrait-wrap"><Portrait id={view} size={72} /></span>
+              <div className="echo-empty-title">Echo · {taglineOf(view)}</div>
+              <div>Assigned to {viewAgent?.title || 'a tab'}. Give it a task; it stays in that tab and the tabs it opens.</div>
+            </div>
+          )}
+          {messages.length === 0 && !onAvatar && (
             <div className="echo-empty">
               {character && <img className="echo-empty-portrait" src={characterAsset(character.id, 'portrait')} alt="" />}
               <div className="echo-empty-title">Hi, I'm {character?.name || 'ECHO'}.</div>
@@ -515,20 +674,20 @@ function Panel() {
 
         <form className="echo-input-row" onSubmit={send}>
           {status && <button type="button" className="echo-stop" onClick={() => {
-            chrome.runtime.sendMessage({ type: 'ECHO_ABORT' }).catch(() => {});
+            chrome.runtime.sendMessage({ type: 'ECHO_ABORT', agent: view }).catch(() => {});
             setStatus('');
           }}>{ICONS.stop}<span>Stop</span></button>}
           <button type="button" className={`echo-toggle ${webSearch ? 'on' : ''}`} onClick={() => setWebSearch(v => !v)}
             title="Search the web for this message (Claude or Gemini)" aria-pressed={webSearch}>{ICONS.globe}</button>
-          <button type="button" className={`echo-toggle ${isolated ? 'on' : ''}`} onClick={toggleIsolated}
-            title="Do this task in a private window without your logins" aria-pressed={isolated}>{ICONS.incognito}</button>
+          {!onAvatar && <button type="button" className={`echo-toggle ${isolated ? 'on' : ''}`} onClick={toggleIsolated}
+            title="Do this task in a private window without your logins" aria-pressed={isolated}>{ICONS.incognito}</button>}
           <input
             ref={inputRef}
             value={input}
             onChange={e => { setInput(e.target.value); updateMenu(e.target.value, e.target.selectionStart ?? e.target.value.length); }}
             onKeyDown={onKeyDown}
             onBlur={() => setTimeout(() => setMenu(null), 150)}
-            placeholder={chat.temporary ? 'Temporary message…' : 'Message ECHO…  (/ skills, @ tabs)'}
+            placeholder={onAvatar ? `Message Echo · ${taglineOf(view)}…` : chat.temporary ? 'Temporary message…' : 'Message ECHO…  (/ skills, @ tabs)'}
             autoFocus
           />
           <button type="submit" className="echo-send" disabled={!input.trim()} aria-label="Send">{ICONS.send}</button>

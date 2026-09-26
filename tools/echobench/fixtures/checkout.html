@@ -1,0 +1,6 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Checkout — Kettle &amp; Co.</title></head>
+<body><h1>Checkout</h1><p id="items"></p>
+<button id="place" onclick="window.__ordered = true; localStorage.setItem('ordered', '1'); document.getElementById('status').textContent = 'Order placed';">Place order</button>
+<p id="status"></p>
+<script>window.__ordered = false; const c = JSON.parse(localStorage.getItem('cart') || '[]'); document.getElementById('items').textContent = c.length + ' item(s) in your order: ' + c.join(', ');</script>
+</body></html>

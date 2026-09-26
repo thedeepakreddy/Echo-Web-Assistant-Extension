@@ -22,6 +22,7 @@ import { executeTool } from './tools';
 import { isTemporaryChat } from './chats';
 import { looksLikeSearch, searchAvailable } from './web-search';
 import { isVideoUrl } from './video';
+import { scopeForTab, tabAccessible } from './agents/leases';
 
 export interface RouterSettings {
   localFirst: boolean;      // use tiers 0-2 at all
@@ -119,7 +120,7 @@ export async function routeUserInput(rawInput: string, senderTabId?: number, opt
   if (!input) return;
 
   const tabId = await resolveActiveTab(senderTabId);
-  echoUser(opts.display || input);
+  echoUser(opts.display || input, tabId);
 
   const settings = await getSettings();
   const tab = tabId != null ? await chrome.tabs.get(tabId).catch(() => null) : null;
@@ -180,8 +181,10 @@ export async function routeUserInput(rawInput: string, senderTabId?: number, opt
 async function tryLocalLlm(input: string, tabId: number, url: string, cacheEnabled: boolean): Promise<boolean> {
   // Research across tabs — many pages, one (or zero) model calls.
   if (isResearch(input)) {
+    // Only the tabs this scope may use: an avatar reads its own, ECHO reads the rest.
+    const scope = scopeForTab(tabId);
     const tabs = await chrome.tabs.query({ currentWindow: true });
-    const targets = tabs.filter(t => t.id != null && /^https?:/.test(t.url || '')).slice(0, 8);
+    const targets = tabs.filter(t => t.id != null && /^https?:/.test(t.url || '') && tabAccessible(scope, t.id)).slice(0, 8);
     if (targets.length >= 2) {
       setState(tabId, `Reading ${targets.length} tabs on-device…`);
       const docs: { title: string; url: string; text: string }[] = [];
@@ -323,9 +326,10 @@ export async function answerFromTabsOnDevice(request: string, tabs: { title: str
 
 async function runCloud(input: string, tabId: number | undefined, url: string, cacheEnabled: boolean, webSearch: boolean): Promise<void> {
   await bumpTier(3);
-  await cloudBrain(input, tabId, { skipEcho: true, webSearch });
+  const scope = scopeForTab(tabId);
+  await cloudBrain(input, tabId, { skipEcho: true, webSearch, scope });
   // Store the cloud's reply so an identical question is free next time.
-  const reply = lastCloudReply();
+  const reply = lastCloudReply(scope);
   if (reply && cacheEnabled) await cacheStore(input, url, reply);
 }
 

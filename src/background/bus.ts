@@ -5,6 +5,7 @@
 // panel and the persistent transcript can never drift out of sync.
 
 import { appendEntry, newChat, isTemporaryChat, ChatEntry, Source } from './chats';
+import { DEFAULT_SCOPE, scopeForTab } from './agents/leases';
 
 export type TranscriptEntry = ChatEntry;
 
@@ -23,8 +24,13 @@ export async function clearTranscript(): Promise<void> {
  * conversational traffic to extension pages (side panel / popup).
  * Every send is failure-tolerant: a missing receiver is normal and must never
  * reject into the caller's control flow.
+ *
+ * Each message is tagged with the scope that owns the tab — an avatar id, or
+ * 'default' for the classic ECHO — so the panel keeps each avatar's thread
+ * apart and the transcript lands in the right chat.
  */
 export function safeSendMessage(tabId: number | undefined | null, msg: any) {
+  msg = { ...msg, agent: scopeForTab(tabId) };
   if (tabId !== undefined && tabId !== null) {
     chrome.tabs.sendMessage(tabId, msg).catch(() => { /* no content script on this tab */ });
   }
@@ -32,7 +38,7 @@ export function safeSendMessage(tabId: number | undefined | null, msg: any) {
     try { chrome.runtime.sendMessage(msg).catch(() => {}); } catch { /* no page open */ }
   }
   if (msg.type === 'ECHO_SAY' && typeof msg.text === 'string') {
-    pushTranscript({ role: 'echo', text: msg.text, tier: msg.tier, sources: msg.sources, searchHtml: msg.searchHtml });
+    pushTranscript({ role: 'echo', text: msg.text, tier: msg.tier, sources: msg.sources, searchHtml: msg.searchHtml, agent: msg.agent });
   }
 }
 
@@ -51,10 +57,11 @@ export function setState(tabId: number | undefined, state: string) {
   safeSendMessage(tabId, { type: 'ECHO_STATE', state });
 }
 
-/** Echo the user's own message into the transcript + panel. */
-export function echoUser(text: string) {
-  pushTranscript({ role: 'user', text });
-  try { chrome.runtime.sendMessage({ type: 'ECHO_USER_ECHO', text }).catch(() => {}); } catch { /* ignore */ }
+/** Echo the user's own message into the transcript + panel of the scope that owns `tabId`. */
+export function echoUser(text: string, tabId?: number | null) {
+  const agent = scopeForTab(tabId);
+  pushTranscript({ role: 'user', text, agent });
+  try { chrome.runtime.sendMessage({ type: 'ECHO_USER_ECHO', text, agent }).catch(() => {}); } catch { /* ignore */ }
 }
 
 /** Push a proactive, dismissible suggestion (Tier 2 passive observer). */
@@ -62,12 +69,16 @@ export function suggest(tabId: number | undefined, text: string, action: string)
   safeSendMessage(tabId, { type: 'ECHO_SUGGEST', text, action });
 }
 
-/** Resolve a usable tab id when the request came from the side panel/popup. */
+/**
+ * Resolve a usable tab id when the request came from the side panel/popup.
+ * A tab that belongs to an avatar is never picked up this way: requests
+ * without a tab are the classic ECHO's, and it leaves avatars' tabs alone.
+ */
 export async function resolveActiveTab(tabId?: number | null): Promise<number | undefined> {
   if (tabId !== undefined && tabId !== null) return tabId;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    return tab?.id;
+    return tab?.id != null && scopeForTab(tab.id) === DEFAULT_SCOPE ? tab.id : undefined;
   } catch {
     return undefined;
   }

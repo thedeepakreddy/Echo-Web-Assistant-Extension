@@ -1,6 +1,19 @@
 import { requestApproval, logAction, safeNavigationUrl, currentTaskEpoch, sensitiveAction } from './safety';
 import { cacheClear } from './response-cache';
 import { agentScope, assertInScope, assertIsolatedUrl } from './isolation';
+import { DEFAULT_SCOPE, adoptChildTab, scopeForTab, tabAccessible } from './agents/leases';
+
+/**
+ * An agent may only reach its own tab and the tabs it opened; the classic ECHO
+ * may reach any tab no avatar holds. Checked wherever a tool picks a new tab.
+ */
+function assertTabAccess(fromTabId: number | undefined, targetTabId: number): void {
+  const scope = scopeForTab(fromTabId);
+  if (tabAccessible(scope, targetTabId)) return;
+  throw new Error(scope === DEFAULT_SCOPE
+    ? 'That tab is assigned to an ECHO avatar, so it is left alone.'
+    : 'You can only use your own tab and the tabs you opened from it.');
+}
 
 // Poll until a tab's status is 'complete' or the timeout fires.
 // Resolves early on chrome.runtime.lastError so callers never hang.
@@ -31,9 +44,10 @@ const DOM_ACTIONS = new Set([
 ]);
 
 export async function executeTool(toolName: string, args: any, tabId?: number): Promise<any> {
-  const epoch = currentTaskEpoch();
+  // Stop signals and isolation belong to the scope that owns this tab.
+  const epoch = currentTaskEpoch(tabId);
   // Isolated browsing: every tab-touching tool stays inside the private window.
-  const scope = agentScope();
+  const scope = agentScope(scopeForTab(tabId));
   if (scope && (DOM_ACTIONS.has(toolName) || ['navigate', 'screenshot'].includes(toolName))) {
     await assertInScope(tabId);
   }
@@ -74,7 +88,7 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
           await logAction(toolName, detail, 'denied');
           throw new Error('Action denied or approval timed out.');
         }
-        if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before the action.');
+        if (currentTaskEpoch(tabId) !== epoch) throw new Error('Task stopped before the action.');
         await logAction(toolName, detail, 'approved');
       }
     }
@@ -99,7 +113,7 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
       if (!tabId) throw new Error('No tab to capture.');
       const target = await chrome.tabs.get(tabId);
       if (!target.active || target.windowId == null) throw new Error('Switch to the requested tab before capturing a screenshot.');
-      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before screenshot.');
+      if (currentTaskEpoch(tabId) !== epoch) throw new Error('Task stopped before screenshot.');
       await logAction('screenshot', 'current tab image', 'done');
       // captureVisibleTab captures the active tab in this exact window.
       return new Promise((resolve, reject) => {
@@ -112,8 +126,8 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
 
     case 'open_url': {
       const url = safeNavigationUrl(args.url);
-      assertIsolatedUrl(url);
-      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before navigation.');
+      assertIsolatedUrl(url, tabId);
+      if (currentTaskEpoch(tabId) !== epoch) throw new Error('Task stopped before navigation.');
       await logAction('open_url', new URL(url).origin, 'done');
       // Create the tab, wait for it to fully load, then return the NEW tab's id.
       // The brain loops watch for `newTabId` in the result and update their
@@ -124,6 +138,9 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
           else resolve(tab);
         });
       });
+      // A tab an avatar opens is part of its lease: it may keep working there.
+      const owner = scopeForTab(tabId);
+      if (owner !== DEFAULT_SCOPE && newTab.id != null) await adoptChildTab(owner, newTab.id);
       await waitForTabLoad(newTab.id!);
       return { success: true, newTabId: newTab.id, message: `Opened ${args.url} in a new tab (id: ${newTab.id}). Use read_screen now to see it.` };
     }
@@ -131,8 +148,8 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
     case 'navigate': {
       if (!tabId) throw new Error('No active tab to navigate');
       const url = safeNavigationUrl(args.url);
-      assertIsolatedUrl(url);
-      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before navigation.');
+      assertIsolatedUrl(url, tabId);
+      if (currentTaskEpoch(tabId) !== epoch) throw new Error('Task stopped before navigation.');
       await logAction('navigate', new URL(url).origin, 'done');
       await new Promise<void>((resolve, reject) => {
         chrome.tabs.update(tabId, { url }, () => {
@@ -146,10 +163,11 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
     }
 
     case 'list_tabs': {
+      const caller = scopeForTab(tabId);
       return new Promise((resolve, reject) => {
         chrome.tabs.query(scope ? { windowId: scope.windowId } : {}, (tabs) => {
           if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-          const list = tabs.slice(0, 30).map(t => ({
+          const list = tabs.filter(t => t.id != null && tabAccessible(caller, t.id)).slice(0, 30).map(t => ({
             id: t.id,
             title: (t.title || '').substring(0, 70),
             url: (t.url || '').substring(0, 120),
@@ -161,6 +179,7 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
     }
 
     case 'switch_tab': {
+      assertTabAccess(tabId, Number(args.tabId));
       await assertInScope(Number(args.tabId));
       return new Promise((resolve, reject) => {
         chrome.tabs.update(Number(args.tabId), { active: true }, (tab) => {
@@ -174,8 +193,9 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
     case 'close_tab': {
       const targetTabId = Number(args.tabId);
       if (!Number.isInteger(targetTabId) || targetTabId <= 0) throw new Error('Invalid tab ID.');
+      assertTabAccess(tabId, targetTabId);
       await assertInScope(targetTabId);
-      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before closing the tab.');
+      if (currentTaskEpoch(tabId) !== epoch) throw new Error('Task stopped before closing the tab.');
       await logAction('close_tab', `tab ${targetTabId}`, 'done');
       return new Promise((resolve, reject) => {
         chrome.tabs.remove(targetTabId, () => {
@@ -190,7 +210,7 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
       const filename = String(args.filename || 'echo-download.txt');
       if (!/^[^/\\\x00-\x1f]{1,120}$/.test(filename) || filename === '.' || filename === '..')
         throw new Error('Invalid download filename.');
-      if (currentTaskEpoch() !== epoch) throw new Error('Task stopped before download.');
+      if (currentTaskEpoch(tabId) !== epoch) throw new Error('Task stopped before download.');
       await logAction('download_data', filename, 'done');
       const mime = filename.endsWith('.json') ? 'application/json'
         : filename.endsWith('.csv') ? 'text/csv' : 'text/plain';
@@ -288,6 +308,7 @@ export async function executeTool(toolName: string, args: any, tabId?: number): 
           delete memory[args.key];
           chrome.storage.local.set({ echo_memory: memory }, async () => {
             await cacheClear();
+            // Memories are shared by every avatar, so every conversation forgets.
             const { forgetCloudConversationAfterReply } = await import('./brain');
             forgetCloudConversationAfterReply();
             resolve({ success: true, message: `Deleted '${args.key}' from memory.` });

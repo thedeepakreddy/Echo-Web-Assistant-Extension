@@ -1,0 +1,8 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Request a callback</title></head>
+<body><h1>Request a callback</h1>
+<form id="f" onsubmit="event.preventDefault(); window.__submitted = true; document.getElementById('done').textContent = 'Submitted';">
+<label>Full name <input id="name" name="name" autocomplete="name"></label><br>
+<label>Email <input id="email" name="email" type="email" autocomplete="email"></label><br>
+<label>Phone <input id="phone" name="phone" type="tel" autocomplete="tel"></label><br>
+<button type="submit">Request callback</button></form><p id="done"></p>
+<script>window.__submitted = false;</script></body></html>
