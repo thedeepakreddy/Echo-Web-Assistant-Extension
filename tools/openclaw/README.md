@@ -36,10 +36,17 @@ on OpenClaw; until then they use ECHO's built-in brain.
 
 ## How a request flows
 
+Only avatars run on OpenClaw: the classic ECHO chat always uses the built-in
+brain, and its side panel says so (with a shortcut to give the tab to an
+avatar) once OpenClaw is Ready. An avatar's thread shows "on OpenClaw" or
+"built-in brain" under its name.
+
 A message to an avatar (side panel thread, or the orb in its tab) first tries
 ECHO's local skills (stop, workflows, extractors: instant and free). Otherwise
 it becomes a run in the avatar's session, `agent:<agentId>:lease-<leaseId>`
-(one per tab assignment). Progress ("Using observe…") comes from gateway
+(one per tab assignment). ECHO offers the gateway only the tools of avatars
+that have a tab in this browser, and a run starts once its avatar's tools are
+on offer. Progress ("Using observe…") comes from gateway
 events; the reply comes from `agent.wait`, so it arrives even if events were
 missed while ECHO reconnected, and runs in flight survive a worker restart.
 Stopping an avatar aborts its run on the gateway. Paying and sending still ask
@@ -60,6 +67,13 @@ The probe and e2e keep a test identity in `tools/openclaw/.probe-state/`
 remove the throwaway device they pair.
 
 ## Known issues (OpenClaw 2026.9.6)
+
+- **The same avatar in two browsers.** When two nodes offer a tool with the
+  same name, the gateway renames both copies, so neither matches the agent's
+  allowlist and the run fails with "No callable tools remain". Each browser
+  offers only its assigned avatars' tools, so this happens only when one
+  avatar has a tab in two browsers on the same gateway; the avatar then says
+  to release it in the other browser.
 
 - **claude-cli runtime and reconnects.** The warm Claude Code process stays
   bound to the operator connection that started it. After that connection

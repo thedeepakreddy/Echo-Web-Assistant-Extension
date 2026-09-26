@@ -260,3 +260,162 @@ test('approvals: too little time left means no prompt, and a clear reason for th
   assert.equal(await safety.requestApproval('click_element', 'Payment: Place order', 3, 3000), false);
   assert.equal(safety.pendingApproval(3), null, 'no prompt was shown');
 });
+
+// --- honest endings ------------------------------------------------------------------
+
+test('sessions: a run that ends with no words is not reported as done', async () => {
+  const { sessions, host, said } = sessionHarness();
+  const conn = fakeOperator();
+  const mgr = sessions.createSessionManager(conn, host);
+  const done = mgr.run('echo-analyst', 'check the price');
+  await settle();
+  conn.finishWait({ runId: 'run-1', status: 'ok' });
+  await done;
+  assert.equal(said.length, 1);
+  assert.doesNotMatch(said[0].text, /^Done/);
+  assert.match(said[0].text, /can't confirm the result/);
+});
+
+test('sessions: "no callable tools" (the same avatar in two browsers) is explained', async () => {
+  const { sessions, host, said } = sessionHarness();
+  const conn = fakeOperator();
+  const mgr = sessions.createSessionManager(conn, host);
+  const done = mgr.run('echo-analyst', 'check the price');
+  await settle();
+  conn.finishWait({ runId: 'run-1', status: 'error', error: { message: 'No callable tools remain after resolving explicit tool allowlist (agents.echo-analyst.tools.allow: analyst_observe)' } });
+  await done;
+  assert.match(said[0].text, /another browser/);
+  assert.match(said[0].text, /Echo · tagline of echo-analyst/);
+  assert.equal(sessions.failureText('echo-analyst', 'model timed out.'), "I couldn't finish that: model timed out.");
+});
+
+// --- which tools this browser offers ------------------------------------------------
+
+/** index.ts with fake sockets: records every request and lets the test drive connection events. */
+function openClawHarness({ publishDelayMs = 0 } = {}) {
+  const local = new Map([['echo_openclaw', { enabled: true, url: 'ws://127.0.0.1:18790' }]]);
+  const area = map => ({
+    get: async keys => Object.fromEntries([].concat(keys).filter(k => map.has(k)).map(k => [k, map.get(k)])),
+    set: async data => Object.entries(data).forEach(([k, v]) => map.set(k, JSON.parse(JSON.stringify(v)))),
+  });
+  const chrome = {
+    storage: { local: area(local), session: area(new Map()), onChanged: { addListener: () => {} } },
+    runtime: { sendMessage: () => Promise.resolve(), getManifest: () => ({ version: '2.0.0' }) },
+    alarms: { create: () => {}, clear: async () => true },
+  };
+  const conns = {};
+  const events = [];
+  const connection = {
+    createGatewayConnection: opts => {
+      const conn = conns[opts.role] = {
+        opts, connected: false, requests: [],
+        start: () => {}, stop: () => {},
+        request: async (method, params) => {
+          conn.requests.push({ method, params: plain(params) });
+          if (method === 'node.describe') return { approvalState: 'approved' };
+          if (method === 'node.pluginTools.update') {
+            await settle(publishDelayMs);
+            events.push(`publish:${plain(params).tools.map(t => t.name.split('_')[0]).filter((v, i, a) => a.indexOf(v) === i).join(',')}`);
+          }
+          return {};
+        },
+      };
+      return conn;
+    },
+  };
+  const leases = new Map();
+  const listeners = [];
+  const leasesModule = {
+    leasesReady: Promise.resolve(),
+    leaseFor: agent => leases.get(agent) || null,
+    listLeases: () => [...leases.values()],
+    onLeaseChange: fn => listeners.push(fn),
+  };
+  const lease = (agent, tabId) => {
+    const previous = leases.get(agent);
+    if (tabId == null) leases.delete(agent); else leases.set(agent, { agent, tabId, leaseId: `L-${agent}`, children: [] });
+    listeners.forEach(fn => fn({ agent, lease: leases.get(agent) || null, previous }));
+  };
+  const looked = [];
+  const aborted = [];
+  const runs = [];
+  const r = registry();
+  const openclaw = loadTs('src/background/openclaw/index.ts', {
+    chrome,
+    setTimeout: (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return t; },
+  }, {
+    connection,
+    'node-tools': loadTs('src/background/openclaw/node-tools.ts'),
+    identity: { deviceIdentity: async () => ({ deviceId: 'dev-1' }), indexedDbKeyStore: {} },
+    'browser-tools': {
+      browserToolsFor: a => ['observe', 'act'].map(tool => ({ name: `${a.slug}_${tool}`, command: `echo.${a.slug}.${tool}`,
+        description: tool, parameters: {}, run: async () => ({}) })),
+      resetLooking: agent => looked.push(agent),
+    },
+    sessions: { createSessionManager: () => ({
+      run: async character => { runs.push(character); events.push(`run:${character}`); },
+      abort: async character => { aborted.push(character); },
+      busy: () => false, resume: async () => {}, handleEvent: () => {},
+    }) },
+    './registry': r,
+    'setup-script': { TESTED_OPENCLAW: 'test' },
+    leases: leasesModule,
+    bus: { sayAs: () => {}, setStateAs: () => {} },
+  });
+  const connect = async () => {
+    openclaw.startOpenClaw();
+    await settle();
+    for (const role of ['operator', 'node']) {
+      const c = conns[role];
+      c.connected = true;
+      c.opts.onState({ kind: 'connected' });
+      c.opts.onHello({ server: { version: 'test' } });
+    }
+    await settle(publishDelayMs + 30);
+  };
+  const published = () => conns.node.requests.filter(q => q.method === 'node.pluginTools.update').map(q => q.params.tools.map(t => t.name));
+  return { openclaw, conns, connect, lease, published, events, looked, aborted, runs };
+}
+
+test('openclaw: a browser offers tools only for the avatars that have a tab in it', async () => {
+  const h = openClawHarness();
+  await h.connect();
+  assert.deepEqual(plain(h.published().at(-1)), [], 'no avatar has a tab yet: nothing on offer');
+  assert.equal(h.openclaw.openClawReadyFor('echo-analyst'), true, 'ready: approved and connected');
+
+  h.lease('echo-analyst', 5);
+  await settle();
+  assert.deepEqual(plain(h.published().at(-1)), ['analyst_observe', 'analyst_act']);
+
+  h.lease('echo-style', 6);
+  await settle();
+  assert.deepEqual(plain(h.published().at(-1)).sort(), ['analyst_act', 'analyst_observe', 'style_act', 'style_observe']);
+
+  h.lease('echo-analyst', null);
+  await settle();
+  assert.deepEqual(plain(h.published().at(-1)), ['style_observe', 'style_act']);
+  assert.deepEqual(plain(h.looked), ['echo-analyst']);
+  assert.deepEqual(plain(h.aborted), ['echo-analyst'], 'releasing the tab stops its run');
+});
+
+test('openclaw: a run starts only once its avatar\'s tools are on offer', async () => {
+  const h = openClawHarness({ publishDelayMs: 40 });
+  await h.connect();
+  h.events.length = 0;
+  h.lease('echo-style', 6);             // assigned, and a task sent straight away
+  await h.openclaw.runOnOpenClaw('echo-style', 'what is on this page?');
+  assert.deepEqual(plain(h.events), ['publish:style', 'run:echo-style']);
+});
+
+test('openclaw: after a reconnect the same tools are offered again', async () => {
+  const h = openClawHarness();
+  await h.connect();
+  h.lease('echo-officer', 9);
+  await settle();
+  const before = h.published().length;
+  h.conns.node.opts.onState({ kind: 'connecting' });
+  h.conns.node.opts.onHello({});
+  await settle();
+  assert.equal(h.published().length, before + 1);
+  assert.deepEqual(plain(h.published().at(-1)), ['officer_observe', 'officer_act']);
+});

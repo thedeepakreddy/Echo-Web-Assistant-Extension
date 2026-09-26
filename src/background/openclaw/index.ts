@@ -13,7 +13,7 @@ import { browserToolsFor, resetLooking } from './browser-tools';
 import { createSessionManager, type SessionManager } from './sessions';
 import { AVATAR_AGENTS, allCommands, avatarByCharacter } from './registry';
 import { TESTED_OPENCLAW } from './setup-script';
-import { leaseFor, leasesReady, onLeaseChange } from '../agents/leases';
+import { leaseFor, leasesReady, listLeases, onLeaseChange } from '../agents/leases';
 import { sayAs, setStateAs } from '../bus';
 import type { GatewayBrowserDeviceTokenStore, HelloOk } from '@openclaw/gateway-client/browser';
 
@@ -70,6 +70,8 @@ let connections: GatewayConnection[] = [];
 let node: GatewayConnection | null = null;
 let operator: GatewayConnection | null = null;
 let sessions: SessionManager | null = null;
+/** Offer the tools of the avatars with a tab here; resolves once the gateway has them. */
+let syncTools: (() => Promise<void>) | null = null;
 let toolsPublished = false;
 let serverVersion: string | undefined;
 let commandApproval: OpenClawStatus['commands'] = { state: 'unknown' };
@@ -138,6 +140,7 @@ function stop() {
   connections = [];
   node = operator = null;
   sessions = null;
+  syncTools = null;
   toolsPublished = false;
   publishState('node', { kind: 'stopped' });
   publishState('operator', { kind: 'stopped' });
@@ -165,23 +168,44 @@ async function start() {
   const startNode = () => { if (!nodeStarted && connections.includes(nodeConn)) { nodeStarted = true; nodeConn.start(); } };
 
   let host: ReturnType<typeof createNodeToolHost> | null = null;
+  // Only the avatars with a tab in this browser offer tools. Two browsers on
+  // one gateway would otherwise publish the same tool names, and the gateway
+  // renames clashing tools so no avatar's allowlist matches them.
+  const characterOf = new Map(tools.map(tool => [tool.command, AVATAR_AGENTS.find(a => tool.command.startsWith(`echo.${a.slug}.`))?.character]));
+  let offered: string | null = null;
+  let publishing: Promise<void> = Promise.resolve();
+  const sync = (): Promise<void> => {
+    publishing = publishing.catch(() => {}).then(async () => {
+      await leasesReady;
+      if (!host || !nodeConn.connected) throw new Error('OpenClaw is not connected.');
+      const leased = new Set(listLeases().map(l => l.agent));
+      const key = [...leased].sort().join(',');
+      if (key === offered) return;
+      await host.publish(tool => leased.has(characterOf.get(tool.command) || ''));
+      offered = key;
+      toolsPublished = true;
+    });
+    return publishing;
+  };
   const nodeConn = createGatewayConnection({
     url: current.url, role: 'node', sharedToken: current.sharedToken, identity, tokenStore,
     client: { id: 'node-host', mode: 'node', version, platform: 'chrome', displayName: 'ECHO (Chrome)' },
     scopes: [], commands: allCommands(),
     onState: s => {
-      if (s.kind !== 'connected') toolsPublished = false;
+      if (s.kind !== 'connected') { toolsPublished = false; offered = null; }
       publishState('node', s);
       forgetSharedTokenWhenPaired().catch(() => {});
     },
     onEvent: event => host?.handleEvent(event),
     onHello: () => {
       // The gateway drops a node's tools when it disconnects: publish on every hello.
-      host?.publish().then(() => { toolsPublished = true; }).catch(error => console.warn('[ECHO] Publishing tools failed:', error));
+      offered = null;
+      sync().catch(error => console.warn('[ECHO] Publishing tools failed:', error));
       checkCommandApproval().catch(() => {});
     },
   });
   host = createNodeToolHost(nodeConn, tools);
+  syncTools = sync;
 
   const operatorConn = createGatewayConnection({
     url: current.url, role: 'operator', sharedToken: current.sharedToken, identity, tokenStore,
@@ -223,11 +247,13 @@ export function startOpenClaw(): void {
     start().catch(error => console.error('[ECHO] OpenClaw restart failed:', error));
   });
   // An avatar that loses its tab stops its run and forgets where it was looking.
+  // Assigning or releasing an avatar changes which tools this browser offers.
   onLeaseChange(({ agent, lease, previous }) => {
     if (previous && previous.tabId !== lease?.tabId) {
       resetLooking(agent);
       sessions?.abort(agent).catch(() => {});
     }
+    syncTools?.().catch(() => {});
   });
 }
 
@@ -244,7 +270,9 @@ export function openClawReadyFor(character: string): boolean {
 /** Run a message on the avatar's agent; resolves when the run ends or is stopped. */
 export async function runOnOpenClaw(character: string, text: string): Promise<void> {
   await leasesReady;
-  if (!sessions) throw new Error('OpenClaw is not connected.');
+  if (!sessions || !syncTools) throw new Error('OpenClaw is not connected.');
+  // The avatar's tools must be on offer before its run starts.
+  await syncTools();
   return sessions.run(character, text);
 }
 

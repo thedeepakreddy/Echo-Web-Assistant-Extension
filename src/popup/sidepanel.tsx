@@ -19,6 +19,8 @@ interface AgentInfo { agent: string; tabId: number; children: number[]; title: s
 
 /** The classic, unassigned ECHO thread. */
 const DEFAULT_VIEW = 'default';
+// Set once the user hides the "give this tab to an avatar" tip.
+const HINT_KEY = 'echo_openclaw_hint_dismissed';
 // Every avatar is called Echo; the tagline tells them apart. The orb is the core.
 const AVATARS = [...CHARACTERS.map(c => ({ id: c.id, tagline: c.tagline })), { id: REACTOR, tagline: 'Core' }];
 const taglineOf = (id: string) => AVATARS.find(a => a.id === id)?.tagline || 'Core';
@@ -90,6 +92,12 @@ function Panel() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const agentsRef = useRef<AgentInfo[]>([]);
   const [rosterOpen, setRosterOpen] = useState(false);
+  // Avatars run as OpenClaw agents once the gateway is Ready; the classic
+  // ECHO always uses the built-in brain. The panel says which one answers.
+  const [openClawReady, setOpenClawReady] = useState(false);
+  const [hintDismissed, setHintDismissed] = useState(() => {
+    try { return localStorage.getItem(HINT_KEY) === '1'; } catch { return false; }
+  });
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const activeTabRef = useRef<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -110,6 +118,15 @@ function Panel() {
     chrome.runtime.sendMessage({ type: 'ECHO_SKILLS_LIST' })
       .then((r: any) => { if (r?.success) setSkills(r.skills); })
       .catch(() => {});
+  };
+  const refreshOpenClaw = () => {
+    chrome.runtime.sendMessage({ type: 'ECHO_OPENCLAW_STATUS' })
+      .then((r: any) => { if (r?.success) setOpenClawReady(!!r.status.ready); })
+      .catch(() => {});
+  };
+  const dismissHint = () => {
+    setHintDismissed(true);
+    try { localStorage.setItem(HINT_KEY, '1'); } catch { /* the hint just returns next time */ }
   };
   const refreshIsolation = () => {
     chrome.runtime.sendMessage({ type: 'ECHO_ISOLATION_STATUS' })
@@ -227,6 +244,7 @@ function Panel() {
     refreshReport();
     refreshSkills();
     refreshIsolation();
+    refreshOpenClaw();
     // Leases first, then the tab in front decides which thread shows.
     chrome.runtime.sendMessage({ type: 'ECHO_AGENT_LIST' })
       .then((r: any) => { if (r?.success) applyAgents(r.agents); })
@@ -242,6 +260,7 @@ function Panel() {
     const THREAD_TRAFFIC = ['ECHO_SAY', 'ECHO_USER_ECHO', 'ECHO_STATE', 'ECHO_USAGE', 'ECHO_TASK_STATUS'];
     const onMessage = (m: any) => {
       if (m.type === 'ECHO_AGENTS_CHANGED') { applyAgents(m.agents || []); followTab(activeTabRef.current); return; }
+      if (m.type === 'ECHO_OPENCLAW_STATUS_CHANGED') { refreshOpenClaw(); return; }
       // Each avatar talks in its own thread; only the one on screen updates it.
       if (THREAD_TRAFFIC.includes(m.type) && (m.agent || DEFAULT_VIEW) !== viewRef.current) {
         if (m.type === 'ECHO_TASK_STATUS') { refreshAgents(); if (!m.active) refreshReport(); }
@@ -445,7 +464,7 @@ function Panel() {
         <span className="echo-heading">
           <span className="echo-title" title={chat.title}>{onAvatar ? `Echo · ${taglineOf(view)}`
             : chat.temporary ? 'Temporary chat' : chat.title === 'New chat' ? (character?.name || 'ECHO') : chat.title}</span>
-          <span className="echo-subtitle">{status || (onAvatar ? `In ${viewAgent?.title || 'its tab'}`
+          <span className="echo-subtitle">{status || (onAvatar ? `In ${viewAgent?.title || 'its tab'} · ${openClawReady ? 'on OpenClaw' : 'built-in brain'}`
             : chat.temporary ? 'Not saved to history' : 'Online')}</span>
         </span>
         <span className="echo-toolbar-group">
@@ -472,6 +491,14 @@ function Panel() {
               {a.working && <i className="echo-thread-busy" aria-label="working" />}
             </button>
           ))}
+        </div>
+      )}
+
+      {!onAvatar && openClawReady && agents.length === 0 && site && !hintDismissed && (
+        <div className="echo-site echo-hint">
+          <span>Tasks here use ECHO's built-in brain. To run one as an OpenClaw agent, give this tab to an avatar.</span>
+          <button onClick={() => { setRosterOpen(true); setHistoryOpen(false); refreshAgents(); }}>Choose avatar</button>
+          <button className="echo-hint-close" onClick={dismissHint} aria-label="Hide this tip" title="Hide this tip">{ICONS.close}</button>
         </div>
       )}
 
