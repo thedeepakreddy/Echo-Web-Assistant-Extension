@@ -3,6 +3,7 @@
   "name": "ECHO Online",
   "version": "2.0.0",
   "description": "ECHO — autonomous browser assistant with a local-first brain. Most work happens on-device, so your API quota lasts.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt8Ok5gRwpmXUyO6Qr1+YvxHTjU3wSbfOktbulpDNATQU6Q9+4Ct8Ic2jUhQ1Pia4p4A1u3WLjN6S8HIwxP6KDBYRuhhS1PrGoO4wOchaMOQfbFdndh1JZd2TCIf/4JTeMGdrWzFUJ42zejNXmKbCXL+tnw3es8/q5cgjx7f+fbNLx31fIE67zEx4Cb8GR/U+OdiBnBrfpc0+jTfnWHbdHEok5Hf0u+lQA5tl8vINuDJHxTy7e12KwVJOrCiVm4C6QLb9E1IE4OjC5ePXftt0jXg0ooByqYVcm430mrDPAs8BJ1OskqOjeF9NxSY5vSqFpb/1mObbMLwi/lhQB0Wt5wIDAQAB",
   "permissions": [
     "activeTab",
     "scripting",
