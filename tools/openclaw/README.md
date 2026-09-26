@@ -52,6 +52,44 @@ missed while ECHO reconnected, and runs in flight survive a worker restart.
 Stopping an avatar aborts its run on the gateway. Paying and sending still ask
 the user, within the tool call's 30 s deadline.
 
+## What an avatar sees and does
+
+- **observe** gives the page as lines of text and controls in reading order,
+  the whole page (shadow DOM, tables, cards), without hidden text. Each
+  control has a reference like `[e12]` that stays the same while it is on the
+  page; looking again returns only what changed. Field values are never shown
+  (a field is `empty`, `filled` or `protected`).
+- **act** runs up to ten steps by reference (click, type, select, check,
+  press, scroll) and answers with what changed. A reference to a control that
+  was replaced, or from before a page load the avatar did not see, fails with
+  "observe again" instead of acting on another element.
+- **extract** returns data exactly as written (`list` for products and
+  results, tables, prices, emails…); **verify** checks the URL, exact quotes
+  on the whole page and field states, with proof.
+- **screenshot** works only while the avatar's tab is on screen (it never
+  brings a tab forward), as a small JPEG.
+- **workflow** replays the user's recordings; a run that stops at a step says
+  which, and can continue from the next step after the avatar did it by hand.
+  **watch** creates watchers; when one fires, its avatar is woken in its tab.
+- **navigate** and **tabs open** go only to addresses the avatar has seen (on
+  a page it read, or in what the user said), a site's home page, or a web
+  search: a guessed deep link could land on some other page and answer from
+  it. Links on the page are opened by reference; a link that opens a new tab
+  is opened by ECHO (Chrome would block it as a pop-up) and joins the avatar's
+  tabs.
+- Paying and sending ask once. Going to a checkout page does not ask; the
+  payment click there does. A denied action is not asked about again in the
+  same task, and the avatar is told whether the user denied it or did not
+  answer in time.
+- Tool results reach the model as plain text. A tool that cannot do something
+  answers "Not done: …" with the reason, as a result the model always reads.
+
+Everything the tools return is kept as evidence for the conversation. Each
+reply's checkable facts (prices, figures with units, years, dates, emails,
+links, quoted phrases) are looked up in it, and any not found appear under the
+reply as **Unverified**. The same check runs for the classic ECHO's replies.
+Replies stream into the avatar's thread as they are written.
+
 ## Checks
 
 | Command | What it proves |
@@ -60,6 +98,8 @@ the user, within the tool call's 30 s deadline.
 | `npm run openclaw:probe` | origin + device signature accepted, pairing, per-avatar tool isolation, tool round trip (no model) |
 | `npm run openclaw:e2e -- --approve [--agent-run]` | the built extension: pairing, reading a real tab, isolation, idle survival, worker-restart recovery |
 | `npm run openclaw:agents-e2e` | Phase 2, real model turns: setup script, pairing and token removal, eight agents isolated, two avatars in parallel, payment approval, stop, gateway-down fallback and reconnect |
+| `npm run openclaw:harness-e2e` | Phase 3, no model: the avatar tools exactly as a model receives them (references, changes only, stale references refused, select/check/type, payment fields refused, list extraction, quote and field checks, screenshots) |
+| `npm run bench -- --openclaw` | EchoBench with the avatars on the gateway's model; tokens per task from the gateway's session records |
 | `node tools/openclaw/agent-reconnect.cjs` | real model turns keep calling ECHO's tools after the operator connection is replaced |
 
 The probe and e2e keep a test identity in `tools/openclaw/.probe-state/`
@@ -67,6 +107,14 @@ The probe and e2e keep a test identity in `tools/openclaw/.probe-state/`
 remove the throwaway device they pair.
 
 ## Known issues (OpenClaw 2026.9.6)
+
+- **Code Mode.** By default OpenClaw may wrap tool calls in a small script
+  (`exec`); the script can drop a tool's result, and the model then reports an
+  empty page. The setup script turns Code Mode and tool search off for ECHO's
+  profile, and gives avatars no skills (their list alone cost ~1,500 tokens a
+  call). OpenClaw's own base prompt (~2,000 tokens) remains.
+- **Tool errors over `tools.invoke`** come back as "tool execution failed"
+  without the reason, which is why ECHO's tools report problems as results.
 
 - **The same avatar in two browsers.** When two nodes offer a tool with the
   same name, the gateway renames both copies, so neither matches the agent's

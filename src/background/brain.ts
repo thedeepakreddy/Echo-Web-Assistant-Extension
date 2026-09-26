@@ -12,6 +12,7 @@ import { ISOLATED_PROMPT } from './isolation';
 import { isVideoUrl } from './video';
 import type { Source } from './chats';
 import { DEFAULT_SCOPE, scopeForTab, tabAccessible } from './agents/leases';
+import { addEvidence, resetEvidence, unverifiedClaims } from './grounding';
 import { characterById } from '../characters';
 
 // System prompt giving ECHO its identity and instructions.
@@ -117,6 +118,8 @@ let geminiClientKey = '';
  * usage, so avatars run side by side without cutting each other off.
  */
 interface BrainState {
+  /** The classic ECHO ('default') or an avatar id. */
+  scope: string;
   claude: any[];
   gemini: any[];
   /** Together, OpenRouter and Groq. */
@@ -135,7 +138,7 @@ const states = new Map<string, BrainState>();
 function stateFor(scope: string): BrainState {
   let st = states.get(scope);
   if (!st) {
-    st = { claude: [], gemini: [], openai: [], forgetAfterReply: false, controller: null,
+    st = { scope, claude: [], gemini: [], openai: [], forgetAfterReply: false, controller: null,
       lastReply: '', lastReplyUncacheable: false, usage: { steps: 0, input: 0, output: 0 } };
     states.set(scope, st);
   }
@@ -266,6 +269,7 @@ export function abortCurrentWork(scope: string = DEFAULT_SCOPE) {
 export function clearCloudConversation(scope: string = DEFAULT_SCOPE) {
   abortCurrentWork(scope);
   resetHistory(stateFor(scope));
+  resetEvidence(scope);
 }
 
 /** Stop and forget every scope's conversation. */
@@ -343,7 +347,10 @@ function senderFor(st: BrainState): Sender {
       // Accumulate multi-block replies so the cached answer is the whole thing.
       st.lastReply = st.lastReply ? `${st.lastReply}\n${msg.text}` : msg.text;
       if (msg.sources?.length) st.lastReplyUncacheable = true;
-      busSay(tabId, msg.text, 3, { sources: msg.sources, searchHtml: msg.searchHtml });
+      // The model's own words (not ECHO's notices) are checked against what
+      // its tools read; cited search answers carry their sources instead.
+      const unverified = msg.fromModel && !msg.sources?.length ? unverifiedClaims(st.scope, msg.text) : undefined;
+      busSay(tabId, msg.text, 3, { sources: msg.sources, searchHtml: msg.searchHtml, unverified });
       return;
     }
     busSend(tabId, msg);
@@ -415,6 +422,8 @@ export async function processUserInput(userInput: string, tabId?: number, opts: 
   st.lastReplyUncacheable = false;
 
   if (!opts.skipEcho) echoUser(userInput, tabId);
+  // What the user said may be repeated back; it is not a made-up fact.
+  addEvidence(scope, userInput);
 
   try {
     const config = await getAuthConfig();
@@ -576,7 +585,7 @@ async function runClaudeLoop(st: BrainState, client: Anthropic, userInput: strin
         break;
       }
       st.claude.push({ role: 'assistant', content: response.content });
-      if (text) safeSendMessage(activeTabId, { type: 'ECHO_SAY', text, sources });
+      if (text) safeSendMessage(activeTabId, { type: 'ECHO_SAY', text, sources, fromModel: true });
 
       if (response.stop_reason === 'refusal') {
         safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Idle' });
@@ -599,6 +608,7 @@ async function runClaudeLoop(st: BrainState, client: Anthropic, userInput: strin
         safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Executing ' + block.name + '...' });
         try {
           const result = await executeTool(block.name, block.input, activeTabId);
+          if (block.name !== 'screenshot') addEvidence(st.scope, result);
           // Keep activeTabId in sync so subsequent DOM actions hit the right tab.
           if (block.name === 'open_url' && (result as any)?.newTabId) activeTabId = (result as any).newTabId;
           if (block.name === 'switch_tab' && (block.input as any)?.tabId) activeTabId = Number((block.input as any).tabId);
@@ -857,7 +867,7 @@ async function runGeminiLoop(st: BrainState, client: GoogleGenAI, userInput: str
       st.gemini.push({ role: "model", parts });
       for (const p of said) {
         if (signal.aborted) throw new Error('Aborted by user');
-        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: p.text.trim() });
+        safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: p.text.trim(), fromModel: true });
       }
 
       if (!calls.length) {
@@ -872,6 +882,7 @@ async function runGeminiLoop(st: BrainState, client: GoogleGenAI, userInput: str
         safeSendMessage(activeTabId, { type: 'ECHO_STATE', state: 'Executing ' + call.name + '...' });
         try {
           const result = await executeTool(call.name, call.args, activeTabId);
+          if (call.name !== 'screenshot') addEvidence(st.scope, result);
           if (call.name === 'open_url' && (result as any)?.newTabId) activeTabId = (result as any).newTabId;
           if (call.name === 'switch_tab' && call.args?.tabId) activeTabId = Number(call.args.tabId);
           if (call.name === 'screenshot' && result.dataUrl) {
@@ -1047,7 +1058,7 @@ async function runOpenAICompatibleLoop(
       }
       st.openai.push(msg);
 
-      if (said) safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: said });
+      if (said) safeSendMessage(activeTabId, { type: 'ECHO_SAY', text: said, fromModel: true });
 
       if (msg.tool_calls && msg.tool_calls.length > 0) {
         const toolResults: any[] = [];
@@ -1063,6 +1074,7 @@ async function runOpenAICompatibleLoop(
           let resultContent: string;
           try {
             const result = await executeTool(toolName, toolArgs, activeTabId);
+            if (toolName !== 'screenshot') addEvidence(st.scope, result);
             // Track tab changes so subsequent DOM actions hit the right tab.
             if (toolName === 'open_url' && (result as any)?.newTabId) activeTabId = (result as any).newTabId;
             if (toolName === 'switch_tab' && toolArgs?.tabId) activeTabId = Number(toolArgs.tabId);

@@ -6,7 +6,8 @@
 // coordinates — this is far more reliable than document.elementFromPoint,
 // which breaks with fixed headers, overlays, and any scrolling.
 
-import { extractPattern, PatternKind } from './extractors';
+import { extractPattern, extractList, PatternKind } from './extractors';
+import { snapshot, resolveRef, sensitiveField } from './snapshot';
 import { fillForm } from './form-filler';
 import { startRecording, stopRecording, playStep, RecordedStep } from './recorder';
 import { renderHighlights, clearRenderedHighlights } from './highlighter';
@@ -64,11 +65,24 @@ function describe(el: HTMLElement): string {
   return `<${kind}> "${label.substring(0, LABEL_MAX)}"`;
 }
 
-function sensitiveField(el: HTMLElement): boolean {
-  const hints = [el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('id'),
-    el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder')]
-    .filter(Boolean).join(' ');
-  return /pass(word|wd)|\b(cvv|cvc|otp|pin|ssn|token|secret|verification.?code|security.?code)\b|credit.?card|card.?number|\bcc-(number|csc|exp)/i.test(hints);
+/**
+ * The element an action targets: a reference from the agent's page view
+ * (checked to still be the same control), or a number from read_screen.
+ */
+function target(args: any): HTMLElement | undefined {
+  if (args?.ref) return resolveRef(args.ref, args.doc);
+  return echoElements[Number(args?.index)];
+}
+
+function setFieldValue(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string) {
+  // The native setter, so React/Vue controlled inputs register the change.
+  const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype
+    : el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  if (setter) setter.call(el, value);
+  else el.value = value;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 export function handleDomAction(action: string, args: any): any {
@@ -104,9 +118,12 @@ export function handleDomAction(action: string, args: any): any {
       return { success: true, result };
     }
 
+    case 'snapshot':
+      return { success: true, result: snapshot(args || {}) };
+
     case 'click_element': {
-      const idx = Number(args.index);
-      const el = echoElements[idx];
+      const idx = args.ref ? String(args.ref) : Number(args.index);
+      const el = target(args);
       if (!el) {
         return { success: false, error: `No element [${args.index}]. Call read_screen again to refresh the numbered list.` };
       }
@@ -117,13 +134,19 @@ export function handleDomAction(action: string, args: any): any {
         el.scrollIntoView({ block: 'center', inline: 'center' });
       } catch { /* ignore */ }
       const label = describe(el);
+      // A link that opens a new tab: Chrome blocks that as a pop-up when a
+      // script clicks it, so ECHO opens the address itself.
+      const link = el.closest('a[href]') as HTMLAnchorElement | null;
+      if (link && /^https?:/i.test(link.href) && link.target && !['_self', '_top', '_parent'].includes(link.target.toLowerCase())) {
+        return { success: true, result: { clicked: `Clicked [${idx}] ${label}`, newTabUrl: link.href } };
+      }
       el.click();
       return { success: true, result: `Clicked [${idx}] ${label}` };
     }
 
     case 'type_text': {
-      const idx = Number(args.index);
-      const el = echoElements[idx] as HTMLInputElement | HTMLTextAreaElement | HTMLElement;
+      const idx = args.ref ? String(args.ref) : Number(args.index);
+      const el = target(args) as HTMLInputElement | HTMLTextAreaElement | HTMLElement;
       if (!el) {
         return { success: false, error: `No element [${args.index}]. Call read_screen again to refresh the numbered list.` };
       }
@@ -145,14 +168,7 @@ export function handleDomAction(action: string, args: any): any {
         el2.textContent = text;
         el2.dispatchEvent(new Event('input', { bubbles: true }));
       } else {
-        const input = el as HTMLInputElement | HTMLTextAreaElement;
-        // Use the native value setter so React/Vue controlled inputs register the change.
-        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-        if (setter) setter.call(input, text);
-        else input.value = text;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
+        setFieldValue(el as HTMLInputElement | HTMLTextAreaElement, text);
       }
 
       if (args.submit) {
@@ -226,10 +242,79 @@ export function handleDomAction(action: string, args: any): any {
       return { success: true, result: `TITLE: ${document.title}\nTEXT: ${offset}-${end} of ${full.length}\n${end < full.length ? `NEXT_OFFSET: ${end}\n` : ''}\n${text}` };
     }
 
+    case 'select_option': {
+      const el = target(args);
+      if (!(el instanceof HTMLSelectElement)) {
+        return { success: false, error: 'That is not a drop-down list. Click it, observe, then click the option.' };
+      }
+      if (args.expectedLabel && describe(el) !== args.expectedLabel) {
+        return { success: false, error: 'The list changed after approval. Observe again.' };
+      }
+      const want = String(args.option ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const options = Array.from(el.options);
+      const option = options.find(o => o.text.replace(/\s+/g, ' ').trim().toLowerCase() === want || o.value.toLowerCase() === want)
+        || options.find(o => o.text.toLowerCase().includes(want));
+      if (!want || !option) {
+        return { success: false, error: `No option "${args.option}". Options: ${options.slice(0, 20).map(o => `"${o.text.trim()}"`).join(', ')}` };
+      }
+      setFieldValue(el, option.value);
+      return { success: true, result: `Chose "${option.text.trim()}" in ${args.ref}` };
+    }
+
+    case 'set_checked': {
+      const el = target(args);
+      if (!el) return { success: false, error: 'No such element. Observe again.' };
+      if (args.expectedLabel && describe(el) !== args.expectedLabel) {
+        return { success: false, error: 'The control changed after approval. Observe again.' };
+      }
+      const isOn = () => (el instanceof HTMLInputElement ? el.checked : el.getAttribute('aria-checked') === 'true');
+      const want = args.checked !== false;
+      if (isOn() !== want) el.click();
+      return isOn() === want
+        ? { success: true, result: `${args.ref} is now ${want ? 'checked' : 'unchecked'}` }
+        : { success: false, error: `${args.ref} did not change. Observe the page to see why.` };
+    }
+
+    case 'check_field': {
+      // For verify: compare a field without ever returning what it holds.
+      const el = target(args);
+      if (!el) return { success: false, error: 'No such element. Observe again.' };
+      const value = el instanceof HTMLSelectElement ? (el.selectedOptions[0]?.text || '')
+        : el.isContentEditable ? el.innerText : String((el as HTMLInputElement).value ?? '');
+      const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+      const checks: { check: string; pass: boolean }[] = [];
+      if (typeof args.filled === 'boolean') checks.push({ check: `${args.ref} is ${args.filled ? 'filled' : 'empty'}`, pass: !!norm(value) === args.filled });
+      if (typeof args.equals === 'string') checks.push({ check: `${args.ref} holds "${args.equals}"`, pass: !sensitiveField(el) && norm(value) === norm(args.equals) });
+      if (typeof args.checked === 'boolean') {
+        const on = el instanceof HTMLInputElement ? el.checked : el.getAttribute('aria-checked') === 'true';
+        checks.push({ check: `${args.ref} is ${args.checked ? 'checked' : 'unchecked'}`, pass: on === args.checked });
+      }
+      return { success: true, result: checks };
+    }
+
+    case 'find_texts': {
+      // For verify: which of these exact texts the whole page shows, with the
+      // words around each as proof. ECHO's own panel is not part of the page.
+      const own = document.getElementById('echo-extension-root');
+      const body = (document.body?.innerText || '').replace(own?.innerText || '\u0000', '');
+      const flat = body.replace(/\s+/g, ' ');
+      const lower = flat.toLowerCase();
+      const texts: string[] = Array.isArray(args.texts) ? args.texts.map(String).slice(0, 10) : [];
+      return { success: true, result: texts.map(text => {
+        const at = lower.indexOf(text.replace(/\s+/g, ' ').trim().toLowerCase());
+        return { text, found: at >= 0, context: at >= 0 ? flat.slice(Math.max(0, at - 80), at + text.length + 80).trim() : undefined };
+      }) };
+    }
+
+    case 'extract_list':
+      return { success: true, result: extractList(Number(args.index) || 0) };
+
     case 'inspect_action': {
       const wanted = String(args.action || '');
       const index = Number(args.index);
-      let el = Number.isInteger(index) ? echoElements[index] : undefined;
+      let el: HTMLElement | undefined;
+      try { el = args.ref ? resolveRef(args.ref, args.doc) : Number.isInteger(index) ? echoElements[index] : undefined; }
+      catch (error: any) { return { success: false, error: error.message }; }
       if (!el && wanted === 'click_selector') {
         const selectors: string[] = Array.isArray(args.selectors) ? args.selectors : [String(args.selector || '')];
         for (const selector of selectors) {

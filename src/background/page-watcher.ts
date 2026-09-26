@@ -25,6 +25,11 @@ export interface Watcher {
 
 export const WATCH_ALARM_PREFIX = 'echo_watch_';
 
+type FiredListener = (watcher: Watcher, detail: string) => void;
+const firedListeners: FiredListener[] = [];
+/** Called when a watcher's condition is met (after the user is notified). */
+export function onWatcherFired(listener: FiredListener): void { firedListeners.push(listener); }
+
 export async function listWatchers(): Promise<Record<string, Watcher>> {
   const r = await chrome.storage.local.get(['echo_watchers']);
   return (r.echo_watchers || {}) as Record<string, Watcher>;
@@ -171,6 +176,9 @@ export async function runWatcherCheck(id: string): Promise<boolean> {
       message: `${detail}\nClick to open the page.`,
       priority: 2,
     });
+    for (const listener of firedListeners) {
+      try { listener(w, detail); } catch (error) { console.warn('[ECHO] Watcher listener failed:', error); }
+    }
     return true;
   }
 

@@ -1,4 +1,6 @@
-import { requestApproval, logAction, safeNavigationUrl, currentTaskEpoch, sensitiveAction, MIN_APPROVAL_MS } from './safety';
+import {
+  requestApprovalOutcome, rememberDenial, wasDenied, logAction, safeNavigationUrl, currentTaskEpoch, sensitiveAction, MIN_APPROVAL_MS,
+} from './safety';
 import { cacheClear } from './response-cache';
 import { agentScope, assertInScope, assertIsolatedUrl } from './isolation';
 import { DEFAULT_SCOPE, adoptChildTab, scopeForTab, tabAccessible } from './agents/leases';
@@ -37,6 +39,8 @@ const DOM_ACTIONS = new Set([
   'read_screen', 'click_element', 'type_text', 'press_key',
   'scroll', 'find_on_page', 'get_page_text', 'extract_table',
   'go_back', 'go_forward', 'get_video_transcript',
+  // agents' page view (references) and actions on it
+  'snapshot', 'select_option', 'set_checked', 'check_field', 'extract_list', 'find_texts',
   // local-stack actions
   'extract_pattern', 'fill_form', 'click_selector', 'read_value',
   'record_start', 'record_stop', 'play_step',
@@ -51,6 +55,11 @@ export interface ToolOptions {
 /** Leave this long between an approval closing and the caller's deadline. */
 const APPROVAL_DEADLINE_MARGIN_MS = 1_500;
 
+// What an agent is told when the user does not allow a payment or a send.
+const DENIED = 'The user denied this action. Do not try it again; tell them what you wanted to do.';
+const ALREADY_DENIED = 'The user already denied this action in this task, so ECHO did not ask again. Do not try it again; tell the user.';
+const NOT_ANSWERED = 'The user did not answer the approval in time. Tell them what you want to do and ask them to confirm in chat before trying again.';
+
 export async function executeTool(toolName: string, args: any, tabId?: number, opts: ToolOptions = {}): Promise<any> {
   // Stop signals and isolation belong to the scope that owns this tab.
   const epoch = currentTaskEpoch(tabId);
@@ -63,17 +72,17 @@ export async function executeTool(toolName: string, args: any, tabId?: number, o
     if (!tabId) throw new Error('No active tab to execute action');
     // Actions that change the page. They are all logged; only paying and
     // sending a mail or message wait for the user's approval.
-    const guarded = ['click_element', 'click_selector', 'type_text', 'fill_form'].includes(toolName)
+    const guarded = ['click_element', 'click_selector', 'type_text', 'fill_form', 'select_option', 'set_checked'].includes(toolName)
       || (toolName === 'press_key' && String(args?.key) === 'Enter');
     let detail = toolName.replace(/_/g, ' ');
     let approvalDetail = detail;
     let expectedLabel: string | undefined;
     if (guarded) {
-      if (['click_element', 'click_selector', 'type_text'].includes(toolName)) {
+      if (['click_element', 'click_selector', 'type_text', 'select_option', 'set_checked'].includes(toolName)) {
         const inspection: any = await chrome.tabs.sendMessage(tabId, {
           type: 'DOM_ACTION', action: 'inspect_action', args: { action: toolName, ...args },
         });
-        if (!inspection?.success) throw new Error('Could not inspect the target action.');
+        if (!inspection?.success) throw new Error(inspection?.error || 'Could not inspect the target action.');
         if (toolName === 'type_text' && inspection.result?.sensitive) {
           throw new Error('ECHO will not type into password, payment, or verification fields.');
         }
@@ -91,15 +100,22 @@ export async function executeTool(toolName: string, args: any, tabId?: number, o
         key: String(args?.key ?? ''), submit: args?.submit === true });
       if (kind) {
         const prefix = kind === 'payment' ? 'Payment' : 'Send';
+        // Denied once in this task: say so again rather than asking again.
+        const what = `${pageUrl.split(/[?#]/)[0]}|${expectedLabel || toolName}`;
+        if (wasDenied(tabId, what)) {
+          await logAction(toolName, detail, 'denied');
+          throw new Error(ALREADY_DENIED);
+        }
         const approvalWindow = opts.deadline ? opts.deadline - Date.now() - APPROVAL_DEADLINE_MARGIN_MS : undefined;
         if (approvalWindow !== undefined && approvalWindow < MIN_APPROVAL_MS) {
           await logAction(toolName, detail, 'denied');
           throw new Error('This needs the user\'s approval and there is not enough time left to ask. Tell the user what you want to do and ask them to confirm in chat, then try again.');
         }
-        const approved = await requestApproval(toolName, `${prefix}: ${approvalDetail}`, tabId, approvalWindow);
-        if (!approved) {
+        const outcome = await requestApprovalOutcome(toolName, `${prefix}: ${approvalDetail}`, tabId, approvalWindow);
+        if (outcome !== 'approved') {
           await logAction(toolName, detail, 'denied');
-          throw new Error('Action denied or approval timed out.');
+          if (outcome === 'denied') rememberDenial(tabId, what);
+          throw new Error(outcome === 'denied' ? DENIED : outcome === 'timeout' ? NOT_ANSWERED : 'Task stopped before the action.');
         }
         if (currentTaskEpoch(tabId) !== epoch) throw new Error('Task stopped before the action.');
         await logAction(toolName, detail, 'approved');
@@ -114,6 +130,11 @@ export async function executeTool(toolName: string, args: any, tabId?: number, o
       });
       });
       if (guarded) await logAction(toolName, detail, 'done');
+      const newTabUrl = toolName === 'click_element' && result && typeof result === 'object' ? (result as any).newTabUrl : undefined;
+      if (typeof newTabUrl === 'string') {
+        const opened: any = await executeTool('open_url', { url: newTabUrl }, tabId, opts);
+        return `${(result as any).clicked}. The link opens in a new tab: tab ${opened?.newTabId}.`;
+      }
       return result;
     } catch (error) {
       if (guarded) await logAction(toolName, detail, 'failed');

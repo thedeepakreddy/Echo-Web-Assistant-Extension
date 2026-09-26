@@ -39,7 +39,21 @@ test('node tools: a redelivered tool call runs once and returns the first result
   await settle();
   assert.equal(runs, 1);
   assert.equal(conn.replies.length, 2);
-  assert.deepEqual(conn.replies.map(r => [r.id, r.ok, r.payload.run]), [['inv-1', true, 1], ['inv-2', true, 1]]);
+  assert.deepEqual(conn.replies.map(r => [r.id, r.ok, JSON.parse(r.payload.content[0].text).run]), [['inv-1', true, 1], ['inv-2', true, 1]]);
+});
+
+test('node tools: results reach the model as plain text or compact JSON, images as image blocks', async () => {
+  const { createNodeToolHost, toToolResult } = loadTs('src/background/openclaw/node-tools.ts');
+  const conn = fakeConnection();
+  const host = createNodeToolHost(conn, [{ name: 'analyst_observe', command: 'echo.analyst.observe', description: 'd',
+    parameters: {}, run: async () => 'URL: https://shop.test/\nBlue Kettle — $39.00' }]);
+  host.handleEvent(invoke());
+  await settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(conn.replies[0].payload)),
+    { content: [{ type: 'text', text: 'URL: https://shop.test/\nBlue Kettle — $39.00' }] }, 'text stays as written, not re-encoded');
+  assert.equal(toToolResult({ kind: 'prices', items: ['$39.00'] }).content[0].text, '{"kind":"prices","items":["$39.00"]}');
+  const image = { content: [{ type: 'text', text: 'Screenshot' }, { type: 'image', data: 'AAAA', mimeType: 'image/jpeg' }] };
+  assert.equal(toToolResult(image), image);
 });
 
 test('node tools: unknown commands and malformed arguments fail without running anything', async () => {

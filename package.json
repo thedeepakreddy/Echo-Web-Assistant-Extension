@@ -13,7 +13,8 @@
     "openclaw:agent-reconnect": "node tools/openclaw/agent-reconnect.cjs",
     "e2e:agents": "npm run build && node tools/e2e/multi-agent.cjs",
     "bench": "npm run build && node tools/echobench/run.cjs",
-    "openclaw:agents-e2e": "npm run build && node tools/openclaw/agents-e2e.cjs"
+    "openclaw:agents-e2e": "npm run build && node tools/openclaw/agents-e2e.cjs",
+    "openclaw:harness-e2e": "npm run build && node tools/openclaw/harness-e2e.cjs"
   },
   "keywords": [],
   "author": "",

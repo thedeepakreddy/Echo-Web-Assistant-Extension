@@ -74,7 +74,7 @@ async function main() {
   if (!gatewayUp()) throw new Error('Start the gateway first: openclaw --profile echo gateway run');
   const server = http.createServer((req, res) => {
     const file = path.join(FIXTURES, path.basename(new URL(req.url, 'http://x').pathname));
-    if (!fs.existsSync(file)) { res.writeHead(404); res.end(); return; }
+    if (!fs.existsSync(file) || !fs.statSync(file).isFile()) { res.writeHead(404); res.end(); return; }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(fs.readFileSync(file));
   });

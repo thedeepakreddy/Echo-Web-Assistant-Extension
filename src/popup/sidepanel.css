@@ -293,6 +293,37 @@ svg { display: block; }
 .echo-tier.t2 { background: rgba(255, 159, 10, 0.16); color: #ffcd6b; box-shadow: inset 0 0 0 0.5px rgba(255, 159, 10, 0.4); }
 .echo-tier.t3 { background: rgba(255, 69, 58, 0.15); color: #ff9f98; box-shadow: inset 0 0 0 0.5px rgba(255, 69, 58, 0.4); }
 
+/* Facts the reply states that ECHO did not find in what it read. */
+.echo-unverified {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 9px;
+  border-radius: var(--e-r-sm, 10px);
+  background: rgba(255, 159, 10, 0.12);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 159, 10, 0.45);
+  color: #ffcd6b;
+  font: 500 11px/1.35 var(--e-font);
+  cursor: help;
+}
+.echo-unverified svg { flex: none; width: 13px; height: 13px; margin-top: 1px; }
+
+/* A reply still being written. */
+.echo-msg.draft .echo-bubble { opacity: 0.78; }
+.echo-msg.draft .echo-bubble::after {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  margin-left: 3px;
+  vertical-align: -1px;
+  background: currentColor;
+  animation: echo-caret 1s steps(2, start) infinite;
+}
+@keyframes echo-caret { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) { .echo-msg.draft .echo-bubble::after { animation: none; } }
+
 .echo-cite {
   display: inline-block;
   min-width: 16px;

@@ -199,13 +199,19 @@ export async function previewWorkflow(name: string): Promise<string> {
   return `Preview of "${key}" (${wf.steps.length} steps):\n${lines.join('\n')}\nNo actions were taken.`;
 }
 
-export interface PlayResult { ok: boolean; message: string; done: number; total: number }
+export interface PlayResult {
+  ok: boolean; message: string; done: number; total: number;
+  /** The step (1-based) that could not be done, when a run stops on one. */
+  failedStep?: number;
+}
 
 /**
  * Replay a workflow in `tabId`. Navigation steps wait for load; everything
  * else is handed to the content script, which resolves the selector list.
+ * `fromStep` (1-based) continues a run on the current page from that step,
+ * after an agent did a failed step by hand.
  */
-export async function playWorkflow(name: string, tabId: number): Promise<PlayResult> {
+export async function playWorkflow(name: string, tabId: number, fromStep = 1): Promise<PlayResult> {
   const all = await listWorkflows();
   const key = findWorkflowKey(all, name);
   if (!key) {
@@ -221,7 +227,8 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
   const wf = all[key];
   if ((wf.startUrl && !isSafeWorkflowUrl(wf.startUrl)) || wf.steps.some(step => step.type === 'navigate' && !isSafeWorkflowUrl(step.url || '')))
     return { ok: false, done: 0, total: wf.steps.length, message: 'This saved workflow contains a private or token URL and cannot be replayed. Please record it again.' };
-  let done = 0;
+  const start = Math.min(Math.max(1, Math.floor(fromStep) || 1), wf.steps.length + 1);
+  let done = start - 1;
   // Only this tab's scope can stop the run; another avatar's stop leaves it alone.
   const epoch = currentTaskEpoch(tabId);
 
@@ -247,8 +254,9 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
   }
   await logAction('workflow_run', summary, risky ? 'approved' : 'done');
 
-  // Start from the page the recording began on, so selectors line up.
-  if (wf.startUrl) {
+  // Start from the page the recording began on, so selectors line up
+  // (a continued run carries on from the page it is on).
+  if (wf.startUrl && start === 1) {
     try {
       const startUrl = safeNavigationUrl(wf.startUrl);
       await chrome.tabs.update(tabId, { url: startUrl });
@@ -256,7 +264,7 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
     } catch { return { ok: false, done, total: wf.steps.length, message: 'Could not open the workflow start page.' }; }
   }
 
-  for (const step of wf.steps) {
+  for (const step of wf.steps.slice(start - 1)) {
     if (currentTaskEpoch(tabId) !== epoch) return { ok: false, done, total: wf.steps.length, message: 'Workflow stopped by user.' };
     try {
       if (step.type === 'navigate' && step.url) {
@@ -292,7 +300,7 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
       }
       if (!res?.success) {
         return {
-          ok: false, done, total: wf.steps.length,
+          ok: false, done, total: wf.steps.length, failedStep: done + 1,
           message: `Stopped at step ${done + 1} of ${wf.steps.length} — ${res?.error || `couldn't find "${step.label || step.type}"`}. The page may have changed since I recorded it.`,
         };
       }
@@ -303,7 +311,7 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
       if (step.type === 'click' || step.type === 'key') await waitForLoad(tabId, 9000, 0);
     } catch {
       return {
-        ok: false, done, total: wf.steps.length,
+        ok: false, done, total: wf.steps.length, failedStep: done + 1,
         message: `Stopped at step ${done + 1} — the page navigated away mid-run.`,
       };
     }
@@ -313,7 +321,8 @@ export async function playWorkflow(name: string, tabId: number): Promise<PlayRes
   all[key] = wf;
   await chrome.storage.local.set({ echo_workflows: all });
 
-  return { ok: true, done, total: wf.steps.length, message: `Ran "${key}" — all ${done} steps completed.` };
+  return { ok: true, done, total: wf.steps.length,
+    message: start > 1 ? `Ran "${key}" from step ${start} — all ${wf.steps.length} steps completed.` : `Ran "${key}" — all ${done} steps completed.` };
 }
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }

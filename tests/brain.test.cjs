@@ -33,6 +33,7 @@ const plain = v => JSON.parse(JSON.stringify(v));
 function brainWith({ reply, provider = 'gemini', fetchReply, tool = () => ({ text: 'page' }), fastTimers = false }) {
   const calls = [];
   const said = [];
+  const flagged = [];
   const tools = [];
   class GoogleGenAI {
     constructor() {
@@ -52,7 +53,7 @@ function brainWith({ reply, provider = 'gemini', fetchReply, tool = () => ({ tex
     auth: { getAuthConfig: async () => ({ provider, geminiApiKey: 'test-key', geminiModel: 'model-a', groqApiKey: 'test-key', groqModel: 'llama' }) },
     tools: { executeTool: async (name, args) => { tools.push(name); return tool(name, args, tools.length); } },
     bus: {
-      say: (tabId, text) => said.push(text),
+      say: (tabId, text, _tier, extra) => { said.push(text); flagged.push(extra?.unverified || []); },
       safeSendMessage: () => {},
       echoUser: () => {},
     },
@@ -62,6 +63,7 @@ function brainWith({ reply, provider = 'gemini', fetchReply, tool = () => ({ tex
     video: { isVideoUrl: () => false },
     'agents/leases': { DEFAULT_SCOPE: 'default', scopeForTab: () => 'default', tabAccessible: () => true },
     characters: { characterById: () => null },
+    grounding: loadTs('src/background/grounding.ts'),
   };
   const chrome = {
     storage: { local: { get: async () => ({}) } },
@@ -77,7 +79,7 @@ function brainWith({ reply, provider = 'gemini', fetchReply, tool = () => ({ tex
     };
   }
   const brain = loadTs('src/background/brain.ts', globals, modules);
-  return { brain, calls, said, tools };
+  return { brain, calls, said, flagged, tools };
 }
 
 const text = t => ({ candidates: [{ content: { role: 'model', parts: [{ text: t }] }, finishReason: 'STOP' }] });
@@ -196,4 +198,19 @@ test('Groq/OpenRouter: an empty reply is explained and kept, the step limit is r
   assert.ok(messages.some(m => m.role === 'user' && m.content === 'Which product is cheapest?'));
   assert.ok(messages.some(m => m.role === 'assistant' && /not finished yet/.test(m.content)));
   assert.ok(messages.filter(m => m.role === 'assistant').every(m => m.content || m.tool_calls?.length), 'no empty assistant turns');
+});
+
+test('a price the page never showed is marked unverified; ECHO\'s own notices are not checked', async () => {
+  const { brain, said, flagged } = brainWith({
+    reply: (_c, n) => (n === 1 ? toolCall('get_page_text') : text('The Blue Kettle costs $39.00, or $35.00 with a code.')),
+    tool: () => 'Blue Kettle — $39.00 · Steel Kettle — $24.50',
+  });
+  await brain.processUserInput('What does the Blue Kettle cost?', 1);
+  assert.equal(said.at(-1), 'The Blue Kettle costs $39.00, or $35.00 with a code.');
+  assert.deepEqual(plain(flagged.at(-1)), ['$35.00']);
+
+  const quota = brainWith({ reply: () => { throw new Error('429 RESOURCE_EXHAUSTED quota, retry in 38s'); } });
+  await quota.brain.processUserInput('What does it cost?', 1);
+  assert.match(quota.said.at(-1), /rate limit/);
+  assert.deepEqual(plain(quota.flagged.at(-1)), [], 'an error message is not a claim');
 });
