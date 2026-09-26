@@ -21,8 +21,12 @@ import {
 import { createWriterMenus, runWriter, WRITER_MENU_PREFIX } from './writer';
 import { readMentionedTabs, withTabContext } from './tab-context';
 import { resolveAppearance } from '../characters';
+import { startOpenClaw } from './openclaw';
 
 console.log('ECHO Background Service Worker initialized.');
+
+// Agents on ECHO's OpenClaw gateway (off unless enabled in settings).
+startOpenClaw();
 
 // API keys and private history live in local storage. Content scripts only get
 // an explicitly filtered settings relay; pages cannot read the storage area.
